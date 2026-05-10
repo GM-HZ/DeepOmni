@@ -296,7 +296,9 @@ The workspace should be split into small crates with clear ownership. Crates sho
 
 ```text
 crates/
+├── deepomni-core
 ├── deepomni-protocol
+├── deepomni-config
 ├── deepomni-runtime
 ├── deepomni-agent
 ├── deepomni-model-provider
@@ -1188,3 +1190,508 @@ Exit criteria:
 - Keep Computer Use as a plugin boundary from day one.
 - Build test support first so runtime behavior can be developed with deterministic mock providers.
 
+## 16. Review Addendum: Product Scenarios and Production Architecture
+
+This section addresses the first detailed design review. It tightens the PRD around user stories, execution priority, concurrency safety, error boundaries, success metrics, and plugin/skill flow.
+
+### 16.1 Core User Stories
+
+User stories are the reason the runtime boundaries exist. V1 should be validated against these scenarios before implementation details are considered stable.
+
+#### Story 1: SDK Developer Embeds a Local Agent
+
+As a CLI or desktop developer, I want to embed DeepOmni Runtime with a small Rust or TypeScript API so that my product can run a DeepSeek coding agent without reimplementing thread state, tool orchestration, approvals, or streaming.
+
+Acceptance criteria:
+
+- Developer can create a runtime with workspace, model, config, and permission profile.
+- Developer can create a thread, submit a turn, stream events, and approve/reject tools.
+- First token/delta event is observable through the same event protocol used by the server.
+- No UI-specific dependency is required.
+
+#### Story 2: Desktop App Runs a Local Server
+
+As a desktop app, I want to launch `deepomni serve` on localhost and communicate through HTTP/SSE so that the UI can be rebuilt independently from the agent engine.
+
+Acceptance criteria:
+
+- App can call `/health`, create threads, start turns, and subscribe to events.
+- App can show tool approval prompts from structured events.
+- App can reconnect and replay missed events by `since_seq`.
+- Localhost mode works without multi-user auth; optional bearer auth works when enabled.
+
+#### Story 3: Mobile Client Controls a Remote Worker
+
+As a mobile client, I want to connect to a remote DeepOmni server and steer a running agent so that long coding tasks can run on a server while I approve sensitive actions from the phone.
+
+Acceptance criteria:
+
+- Remote server exposes the same thread/turn/event protocol.
+- Approval events include enough metadata for a small client to render decisions.
+- Interrupt and steer operations work while a turn is active.
+- Tool execution happens in the remote workspace, not on the mobile device.
+
+#### Story 4: Plugin Developer Adds a Capability Pack
+
+As a plugin developer, I want to package skills, MCP tools, hooks, commands, and permissions into a plugin so that users can install one capability instead of wiring many pieces manually.
+
+Acceptance criteria:
+
+- Runtime discovers a local plugin manifest.
+- Runtime validates manifest paths and permission declarations.
+- Plugin-contributed skills and MCP tools appear in introspection APIs.
+- Disabling the plugin removes its capabilities from future turns.
+
+#### Story 5: Operator Runs a Production Server
+
+As an operator, I want predictable resource usage, audit-friendly events, and clear error classes so that DeepOmni can run unattended in a CI/server environment.
+
+Acceptance criteria:
+
+- Concurrent threads are bounded by configuration.
+- Tool timeouts and output limits are enforced.
+- State survives process restart.
+- Errors are classified as user-visible, retryable, policy-denied, provider, tool, state, or internal.
+
+## 17. Priority Model
+
+The milestone list is ordered, but implementation work should be classified by priority so parallel work does not blur production criteria.
+
+### 17.1 P0: Runtime Contract and Safety
+
+P0 items block all later work:
+
+- `deepomni-core` error/result foundation.
+- `deepomni-protocol` wire types and event schemas.
+- `deepomni-config` config loading and precedence.
+- Runtime builder, thread manager, event bus, state store.
+- Mock provider and deterministic agent-loop tests.
+- Approval/policy path for mutating tools.
+- Basic HTTP/SSE server shape.
+
+P0 exit criteria:
+
+- One mock-provider turn streams events end to end.
+- One mutating tool requires approval and can be approved/rejected.
+- State can replay thread events after restart.
+
+### 17.2 P1: DeepSeek and Built-in Tools
+
+P1 items make the runtime useful:
+
+- DeepSeek provider.
+- File, grep, shell, apply_patch, and git tools.
+- Tool output truncation/spillover.
+- Context assembly with project instructions.
+- Server approval endpoints.
+- TypeScript SDK skeleton.
+
+P1 exit criteria:
+
+- SDK can run a DeepSeek-backed coding turn with a built-in tool.
+- Built-in tools have temp-workspace integration tests.
+- Provider parser has fixture tests for streaming deltas and tool calls.
+
+### 17.3 P2: Extensions
+
+P2 items make the platform extensible:
+
+- Skill manager.
+- Plugin manager.
+- MCP stdio client.
+- Hook runtime.
+- Minimal CLI.
+- Computer Use protocol placeholders.
+
+P2 exit criteria:
+
+- A local plugin can contribute a skill and MCP tool.
+- Plugin enable/disable changes runtime capability introspection.
+- Computer Use permissions exist but remain disabled by default.
+
+### 17.4 Parallelization Guidance
+
+Can run in parallel:
+
+- `deepomni-protocol` and `deepomni-config`.
+- `deepomni-state` and `deepomni-events` after protocol event types stabilize.
+- Mock provider and built-in tool implementations after tool traits stabilize.
+- Server and TS SDK after thread/turn APIs stabilize.
+
+Must be sequential:
+
+- Protocol before server and SDK.
+- Error taxonomy before crate public APIs.
+- Policy/orchestrator before mutating built-in tools.
+- Plugin manifest before plugin-contributed skills/MCP.
+
+## 18. Core and Config Crate Decision
+
+### 18.1 Add `deepomni-core`
+
+DeepOmni should add a small `deepomni-core` crate, but it must stay intentionally boring. It is a foundation crate, not an application core.
+
+Purpose:
+
+- Framework-level `DeepOmniError`.
+- `Result<T>` alias.
+- Error kind taxonomy.
+- Retryability and user-visibility markers.
+- Redaction helpers for secrets and paths.
+- Shared time/ID helpers only if needed.
+
+Allowed dependencies:
+
+- `thiserror`
+- `anyhow` only at application boundary if needed.
+- `tracing`
+- `time`
+- `uuid`
+
+Forbidden responsibilities:
+
+- Agent loop.
+- Tool registry.
+- Config loading.
+- State access.
+- HTTP types.
+- Provider logic.
+
+Rationale:
+
+- Codex has many small utility crates plus a large `core`; DeepSeek-TUI has a `core` crate but also splits `config`, `protocol`, and `state`.
+- DeepOmni should avoid a large catch-all `core`. `deepomni-runtime` owns orchestration. `deepomni-core` owns only shared framework primitives.
+
+### 18.2 Add `deepomni-config`
+
+DeepOmni should add a first-class `deepomni-config` crate.
+
+Purpose:
+
+- Load global, workspace, environment, and CLI/server override config.
+- Resolve model provider config.
+- Resolve workspace and runtime paths.
+- Resolve permission profiles.
+- Resolve plugin, skill, MCP, and hook roots.
+- Provide redacted config views for diagnostics.
+- Emit config reload events later.
+
+Config precedence:
+
+```text
+explicit runtime builder values
+> CLI/server flags
+> environment variables
+> workspace .deepomni/config.toml
+> user ~/.deepomni/config.toml
+> built-in defaults
+```
+
+References:
+
+- Codex `codex-rs/config`.
+- DeepSeek-TUI `crates/config`.
+
+Testing:
+
+- Precedence matrix tests.
+- Missing config tests.
+- Redaction tests.
+- Workspace override tests.
+- Invalid model/provider tests.
+
+### 18.3 Dependency Rule
+
+Recommended dependency direction:
+
+```text
+deepomni-protocol  -> no runtime deps
+deepomni-core      -> no runtime deps, no protocol dependency unless unavoidable
+deepomni-config    -> protocol + core
+runtime crates     -> protocol + core + config as needed
+server/sdk hosts   -> protocol + runtime + config
+```
+
+If `deepomni-core` starts accumulating business logic, split that logic into a domain crate instead of expanding core.
+
+## 19. Concurrency and Async Runtime Model
+
+### 19.1 Runtime Choice
+
+Use Tokio as the async runtime for V1.
+
+Reasons:
+
+- Axum, reqwest, tokio streams, subprocess management, and SSE integration are mature.
+- Codex and DeepSeek-TUI both operate in async Rust ecosystems.
+- Agent turns, provider streams, tool execution, and event broadcasting are naturally async.
+
+### 19.2 Ownership Model
+
+Top-level runtime state:
+
+```text
+Runtime
+└── Arc<RuntimeInner>
+    ├── ThreadManager
+    ├── EventBus
+    ├── StateStore
+    ├── ToolRegistry
+    ├── ProviderRegistry
+    ├── PolicyEngine
+    ├── PluginManager
+    └── CancellationRegistry
+```
+
+Rules:
+
+- Public handles are cheap clones around `Arc`.
+- Long-running operations must be cancellation-aware.
+- Tool handlers must be `Send + Sync + 'static`.
+- Event payloads must be owned values, not borrowed references.
+- Do not hold locks across `.await` unless the lock is an async lock and the critical section is intentionally small.
+
+### 19.3 Thread and Turn Concurrency
+
+Default model:
+
+- Multiple threads can run concurrently.
+- A single thread allows at most one active turn by default.
+- Steer/interrupt can target an active turn.
+- Future mode can allow multiple child/sub-agent turns under one parent thread, but they must have explicit parent/child relationships.
+
+Controls:
+
+- `max_concurrent_threads`.
+- `max_concurrent_tool_calls_per_turn`.
+- `max_concurrent_model_requests`.
+- `max_concurrent_mcp_calls`.
+- per-tool timeout.
+- per-turn timeout.
+
+### 19.4 Channel Design
+
+Recommended primitives:
+
+- `tokio::sync::broadcast` for live event subscribers.
+- persisted event store for durable replay.
+- `tokio::sync::mpsc` for internal operation queues.
+- `tokio::sync::watch` for runtime shutdown and config reload signals.
+- `CancellationToken` for turn/tool cancellation.
+
+The event bus must not rely only on broadcast channels. Broadcast is best-effort for live subscribers; persisted events are the source of truth.
+
+### 19.5 Lock Strategy
+
+Recommended:
+
+- `RwLock<HashMap<ThreadId, Arc<ThreadHandle>>>` for thread registry.
+- Per-thread mutex for active turn state.
+- State store uses its own database pool and transaction boundaries.
+- Tool registry is immutable after runtime start or updated through copy-on-write snapshots.
+- Plugin capability updates produce a new capability snapshot for future turns; active turns keep their existing snapshot.
+
+Testing:
+
+- `loom` tests for small synchronization primitives if custom concurrency logic appears.
+- Stress tests with 10 concurrent mock threads.
+- Event ordering tests under concurrent tool completion.
+- Cancellation tests for provider stream and shell tool.
+
+## 20. Error Handling Strategy
+
+### 20.1 Error Taxonomy
+
+`deepomni-core` should define:
+
+```text
+DeepOmniError
+├── Config
+├── Protocol
+├── Provider
+├── Tool
+├── PolicyDenied
+├── Sandbox
+├── State
+├── Plugin
+├── Mcp
+├── Timeout
+├── Cancelled
+├── RateLimited
+├── InvalidModelOutput
+└── Internal
+```
+
+Each error should carry:
+
+- stable kind.
+- user-safe message.
+- optional developer detail.
+- retryability.
+- user visibility.
+- redaction status.
+- optional source error.
+
+### 20.2 Boundary Rules
+
+Provider boundary:
+
+- Provider HTTP/API errors become `Provider`, `RateLimited`, or `Timeout`.
+- Streaming parser failures become `InvalidModelOutput`.
+- Raw provider payloads must be redacted before surfacing.
+
+Tool boundary:
+
+- Tool execution failures become `Tool`.
+- Policy rejection is not a tool failure; it is `PolicyDenied`.
+- Sandbox denial becomes `Sandbox` with user-safe explanation.
+
+Server boundary:
+
+- Convert internal errors to protocol error responses.
+- Never expose secrets, API keys, raw env vars, or full internal backtraces by default.
+- Include correlation IDs in logs and responses.
+
+Agent-loop boundary:
+
+- Recoverable tool failures are returned to the model as tool results when safe.
+- Fatal runtime/state/provider failures stop the turn and emit `turn.failed`.
+- Invalid model tool arguments produce a structured validation error that can be returned to the model once; repeated invalid arguments should fail the turn.
+
+### 20.3 Retry Strategy
+
+Retryable:
+
+- transient provider 5xx.
+- rate limits after backoff, if configured.
+- MCP server startup race.
+- state write conflicts where transaction retry is safe.
+
+Not retryable by default:
+
+- policy denial.
+- invalid config.
+- invalid plugin manifest.
+- invalid tool arguments after validation.
+- sandbox denial caused by policy.
+
+Retries must be bounded and observable through tracing.
+
+## 21. Success Metrics and V1 SLOs
+
+V1 is complete only when functional behavior and measurable quality targets are met.
+
+### 21.1 Runtime Performance Targets
+
+- Local mock provider: thread creation P50 under 50 ms.
+- Local mock provider: submit turn to first event P50 under 100 ms.
+- DeepSeek provider: request dispatch overhead before provider response under 100 ms.
+- Event replay: replay 10,000 events under 500 ms on a developer laptop.
+- State persistence: append event P50 under 10 ms with SQLite WAL mode.
+
+### 21.2 Concurrency Targets
+
+- 10 concurrent mock threads complete without event ordering violations.
+- Single process can keep 100 idle threads in memory.
+- Default max active turns is configurable and enforced.
+- One runaway shell/tool cannot block unrelated threads.
+
+### 21.3 Context and Cost Targets
+
+- Runtime can persist and reload a 100k-token-equivalent thread without loading unbounded blobs into memory.
+- Context manager exposes token budget decisions in debug metadata.
+- Provider usage events include prompt, completion, cached, and reasoning token fields when available.
+- Cost estimation is best-effort and explicitly marked unknown when pricing is absent.
+
+### 21.4 Quality Targets
+
+- P0/P1 crates meet documented coverage targets.
+- All public protocol event types have JSON snapshots.
+- Every mutating built-in tool has approval-path tests.
+- Every built-in tool has failure-path tests.
+- Default test suite requires no live DeepSeek API key.
+
+## 22. Plugin, Skill, MCP, and Tool Flow
+
+This flow validates that plugin, skill, MCP, and tool abstractions compose correctly.
+
+### 22.1 Example Plugin
+
+```text
+~/.deepomni/plugins/github-review/
+├── plugin.json
+├── skills/
+│   └── review-pr/SKILL.md
+├── mcp.json
+├── hooks.json
+└── commands/
+    └── review-pr.md
+```
+
+Manifest:
+
+```json
+{
+  "id": "deepomni.github-review",
+  "name": "GitHub Review",
+  "version": "0.1.0",
+  "skills": "./skills",
+  "mcpServers": "./mcp.json",
+  "hooks": "./hooks.json",
+  "commands": "./commands",
+  "permissions": ["network.github", "filesystem.read"],
+  "interface": {
+    "displayName": "GitHub Review",
+    "capabilities": ["review pull requests", "comment on GitHub"]
+  }
+}
+```
+
+### 22.2 Load Sequence
+
+1. `deepomni-config` resolves plugin roots.
+2. `deepomni-plugin` discovers `plugin.json`.
+3. Manifest paths are validated as plugin-root-relative paths.
+4. Plugin permissions are parsed and stored.
+5. `deepomni-skills` registers plugin skills under a plugin namespace.
+6. `deepomni-mcp` starts or prepares configured MCP servers.
+7. `deepomni-hooks` registers plugin hooks.
+8. Runtime builds a capability snapshot.
+9. `/v1/plugins`, `/v1/skills`, and `/v1/mcp/tools` expose the discovered capabilities.
+
+### 22.3 Turn-Time Flow
+
+1. User asks: "Review PR #123."
+2. Context manager sees explicit skill mention, slash command, or capability match.
+3. Runtime injects the `review-pr` skill instructions within the skill token budget.
+4. Model requests an MCP GitHub tool.
+5. Tool registry routes the MCP tool call through the same orchestrator used by built-in tools.
+6. Policy engine checks plugin permissions, network policy, and tool mutability.
+7. If required, runtime emits `tool.call.requires_approval`.
+8. Host approves or rejects.
+9. MCP tool executes.
+10. Tool result is persisted, emitted, and returned to the model.
+11. Post-tool hooks run and can add additional context for the next model request.
+
+### 22.4 Disable Sequence
+
+When a plugin is disabled:
+
+- Its skills are removed from future context snapshots.
+- Its MCP tools are removed from future tool registries.
+- Its hooks stop firing for future turns.
+- Existing persisted events remain replayable.
+- Active turns continue with the capability snapshot they started with unless the host interrupts them.
+
+## 23. Updated Open Questions
+
+The following decisions are now considered architectural, not cosmetic:
+
+- Long context: Should V1 target 100k-token operational reliability first, then 1M-token optimization later?
+- DeepSeek reasoning: How should thinking/reasoning deltas be represented when interleaved with tool calls?
+- Tool-call validation: Should invalid model arguments be returned to the model for self-correction once, or fail immediately for mutating tools?
+- Cost control: Should every turn require a max token/cost budget, or only server/remote mode?
+- Event storage: Is SQLite event storage enough, or do we need append-only JSONL for audit/export from day one?
+- Plugin trust: Should local plugins be trusted after enablement, or should each permission class require explicit user grant?
+- Remote execution: Is V1 remote mode single-tenant token auth, or should the protocol reserve tenant/user IDs immediately?
+- Config reload: Should runtime support live config reload in V1, or require restart for config changes?
