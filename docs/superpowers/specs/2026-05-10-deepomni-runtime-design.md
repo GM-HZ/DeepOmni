@@ -288,6 +288,74 @@ deepomni-runtime
         └── sandbox
 ```
 
+Primary runtime architecture:
+
+```mermaid
+flowchart TB
+    subgraph Hosts["Host Surfaces"]
+        CLI["CLI Host"]
+        TUI["Future TUI Host"]
+        Desktop["Desktop Server Host"]
+        Remote["Remote Server Host"]
+        Mobile["Mobile/Web Client"]
+    end
+
+    subgraph Transport["SDK and Transport"]
+        RustSdk["Rust SDK"]
+        TsSdk["TypeScript SDK"]
+        Server["HTTP/SSE/WebSocket Server"]
+    end
+
+    subgraph Runtime["DeepOmni Runtime"]
+        RuntimeApi["Runtime Facade"]
+        ThreadMgr["Thread Manager"]
+        TurnRunner["Turn Runner"]
+        EventBus["Event Bus + Replay"]
+        ContextMgr["Context Manager"]
+        Policy["Policy + Approval Engine"]
+        ToolOrch["Tool Orchestrator"]
+        State["State Store"]
+    end
+
+    subgraph Capabilities["Capability Plane"]
+        Providers["Model Providers"]
+        Tools["Native Tool Registry"]
+        MCP["MCP Client Bridge"]
+        Skills["Skill Manager"]
+        Plugins["Plugin Manager"]
+        Hooks["Hook Runtime"]
+        Sandbox["Sandbox Manager"]
+    end
+
+    CLI --> RustSdk
+    TUI --> RustSdk
+    Desktop --> Server
+    Remote --> Server
+    Mobile --> TsSdk
+    TsSdk --> Server
+    Server --> RuntimeApi
+    RustSdk --> RuntimeApi
+
+    RuntimeApi --> ThreadMgr
+    ThreadMgr --> TurnRunner
+    TurnRunner --> ContextMgr
+    TurnRunner --> Providers
+    TurnRunner --> ToolOrch
+    ToolOrch --> Policy
+    ToolOrch --> Tools
+    ToolOrch --> MCP
+    ToolOrch --> Sandbox
+    RuntimeApi --> EventBus
+    TurnRunner --> EventBus
+    EventBus --> State
+    ContextMgr --> Skills
+    ContextMgr --> Plugins
+    ToolOrch --> Hooks
+    Plugins --> Skills
+    Plugins --> MCP
+    Plugins --> Hooks
+```
+
 ## 7. Crate Design
 
 The workspace should be split into small crates with clear ownership. Crates should avoid circular dependencies. Protocol crates should not depend on runtime implementation crates.
@@ -322,6 +390,119 @@ crates/
 sdk/
 └── typescript
 ```
+
+Crate dependency layers:
+
+```mermaid
+flowchart TB
+    subgraph L0["Layer 0: Foundation"]
+        Core["deepomni-core\nError, Result, redaction"]
+        Protocol["deepomni-protocol\nWire DTOs and schemas"]
+    end
+
+    subgraph L1["Layer 1: Configuration and Utilities"]
+        Config["deepomni-config"]
+        Events["deepomni-events"]
+        State["deepomni-state"]
+        TestSupport["deepomni-test-support"]
+    end
+
+    subgraph L2["Layer 2: Domain Capabilities"]
+        Model["deepomni-model-provider"]
+        DeepSeek["deepomni-provider-deepseek"]
+        Tools["deepomni-tools"]
+        Builtin["deepomni-tool-builtin"]
+        Policy["deepomni-policy"]
+        Sandbox["deepomni-sandbox"]
+        Context["deepomni-context"]
+        Skills["deepomni-skills"]
+        Plugin["deepomni-plugin"]
+        MCP["deepomni-mcp"]
+        Hooks["deepomni-hooks"]
+    end
+
+    subgraph L3["Layer 3: Orchestration"]
+        Agent["deepomni-agent"]
+        Runtime["deepomni-runtime"]
+        Task["deepomni-task"]
+        Computer["deepomni-computer-use"]
+    end
+
+    subgraph L4["Layer 4: Hosts and SDK"]
+        Server["deepomni-server"]
+        CLI["deepomni-cli"]
+        TSSDK["sdk/typescript"]
+    end
+
+    Config --> Core
+    Config --> Protocol
+    Events --> Core
+    Events --> Protocol
+    State --> Core
+    State --> Protocol
+    Model --> Core
+    Model --> Protocol
+    DeepSeek --> Model
+    DeepSeek --> Core
+    DeepSeek --> Protocol
+    Tools --> Core
+    Tools --> Protocol
+    Policy --> Core
+    Policy --> Protocol
+    Sandbox --> Core
+    Builtin --> Tools
+    Builtin --> Policy
+    Builtin --> Sandbox
+    Context --> Core
+    Context --> Protocol
+    Context --> Skills
+    Context --> Plugin
+    Skills --> Core
+    Skills --> Protocol
+    Plugin --> Core
+    Plugin --> Protocol
+    MCP --> Core
+    MCP --> Protocol
+    MCP --> Tools
+    Hooks --> Core
+    Hooks --> Protocol
+    Hooks --> Tools
+    Agent --> Core
+    Agent --> Protocol
+    Agent --> Model
+    Agent --> Tools
+    Agent --> Policy
+    Agent --> Events
+    Agent --> Context
+    Runtime --> Core
+    Runtime --> Protocol
+    Runtime --> Config
+    Runtime --> Agent
+    Runtime --> State
+    Runtime --> Events
+    Runtime --> Plugin
+    Runtime --> MCP
+    Runtime --> Hooks
+    Task --> Runtime
+    Computer --> Tools
+    Computer --> Policy
+    Server --> Runtime
+    Server --> Config
+    Server --> Protocol
+    CLI --> Runtime
+    CLI --> Config
+    CLI --> Protocol
+    TSSDK --> Protocol
+```
+
+Dependency rules:
+
+- Diagram arrows point from consumer to dependency.
+- Lower layers must not depend on higher layers.
+- `deepomni-protocol` remains wire-compatible and implementation-free.
+- `deepomni-core` remains a small foundation crate, not the agent runtime.
+- `deepomni-config` may depend on protocol/core, but protocol/core must not depend on config.
+- Host crates must not be depended on by runtime/domain crates.
 
 ### 7.2 `deepomni-protocol`
 
@@ -406,10 +587,12 @@ Contains:
 - `AgentLoop`.
 - `TurnRunner`.
 - model streaming parser.
+- DeepSeek reasoning stream handling.
 - tool call detection.
 - tool result continuation.
+- reasoning replay for tool-call continuation.
 - context compaction trigger.
-- sub-agent control boundary.
+- sub-agent spawn/result boundary.
 
 References:
 
@@ -912,18 +1095,24 @@ The turn runner follows this sequence:
 
 1. Receive user input.
 2. Persist turn start.
-3. Assemble context.
-4. Send request to provider.
-5. Stream assistant deltas.
-6. Detect tool calls.
-7. For each tool call, route through tool orchestrator.
-8. Request approval if policy requires it.
-9. Execute under selected sandbox.
-10. Persist tool result and emit events.
-11. Continue model turn with tool results.
-12. Complete turn or compact context if needed.
+3. Build the capability snapshot for this turn.
+4. Assemble context under the token budget.
+5. Send request to provider.
+6. Stream assistant message deltas and reasoning deltas as separate event classes.
+7. Persist complete reasoning blocks when the provider emits them.
+8. Detect tool calls.
+9. Validate tool arguments against the tool schema.
+10. For each tool call, route through tool orchestrator.
+11. Request approval if policy requires it.
+12. Execute under selected sandbox.
+13. Persist tool result and emit events.
+14. Continue model turn with tool results.
+15. For DeepSeek thinking mode, replay the assistant reasoning content required by the provider when continuing after tool calls.
+16. Complete turn or compact context if needed.
 
 All externally visible state changes emit events.
+
+Reasoning replay is a P0 requirement for DeepSeek compatibility. If an assistant message contains tool calls and provider reasoning content, the continuation request must include the complete reasoning content in the provider-specific shape required by DeepSeek. The protocol exposes reasoning as structured runtime events, but the provider adapter owns the exact request serialization.
 
 ## 9. Runtime Event Protocol
 
@@ -938,6 +1127,8 @@ turn.steered
 turn.interrupted
 assistant.message.delta
 assistant.message.completed
+assistant.reasoning.delta
+assistant.reasoning.completed
 tool.call.started
 tool.call.arguments.delta
 tool.call.requires_approval
@@ -947,6 +1138,9 @@ tool.call.completed
 tool.call.failed
 context.compaction.started
 context.compaction.completed
+subagent.spawned
+subagent.completed
+subagent.failed
 turn.completed
 turn.failed
 runtime.warning
@@ -959,6 +1153,8 @@ Events must be:
 - Replayable by `since_seq`.
 - JSON schema documented.
 - Stable across hosts.
+- Able to distinguish final answer text from reasoning text.
+- Able to replay provider-required reasoning content during tool-call continuation without exposing hidden provider internals to hosts that do not render reasoning.
 
 ## 10. SDK API
 
@@ -1266,12 +1462,18 @@ P0 items block all later work:
 - `deepomni-config` config loading and precedence.
 - Runtime builder, thread manager, event bus, state store.
 - Mock provider and deterministic agent-loop tests.
+- DeepSeek reasoning event protocol and reasoning replay semantics.
+- Context budget allocator with deterministic overflow behavior.
+- Minimal sub-agent protocol: spawn/result, parent-child relation, permission inheritance.
 - Approval/policy path for mutating tools.
 - Basic HTTP/SSE server shape.
 
 P0 exit criteria:
 
 - One mock-provider turn streams events end to end.
+- Reasoning deltas can be emitted, persisted, replayed, and included in provider continuation fixtures.
+- Context assembly produces budget debug metadata and deterministic truncation decisions.
+- Parent thread can spawn a child sub-agent and receive a structured result.
 - One mutating tool requires approval and can be approved/rejected.
 - State can replay thread events after restart.
 
@@ -1283,6 +1485,7 @@ P1 items make the runtime useful:
 - File, grep, shell, apply_patch, and git tools.
 - Tool output truncation/spillover.
 - Context assembly with project instructions.
+- Context compaction strategy beyond deterministic truncation.
 - Server approval endpoints.
 - TypeScript SDK skeleton.
 
@@ -1688,10 +1891,227 @@ When a plugin is disabled:
 The following decisions are now considered architectural, not cosmetic:
 
 - Long context: Should V1 target 100k-token operational reliability first, then 1M-token optimization later?
-- DeepSeek reasoning: How should thinking/reasoning deltas be represented when interleaved with tool calls?
 - Tool-call validation: Should invalid model arguments be returned to the model for self-correction once, or fail immediately for mutating tools?
 - Cost control: Should every turn require a max token/cost budget, or only server/remote mode?
 - Event storage: Is SQLite event storage enough, or do we need append-only JSONL for audit/export from day one?
 - Plugin trust: Should local plugins be trusted after enablement, or should each permission class require explicit user grant?
 - Remote execution: Is V1 remote mode single-tenant token auth, or should the protocol reserve tenant/user IDs immediately?
 - Config reload: Should runtime support live config reload in V1, or require restart for config changes?
+
+## 24. DeepSeek Reasoning and Tool-Call Continuation
+
+DeepSeek reasoning is not a display-only feature. In thinking mode, reasoning content can be part of the provider-required conversation state. If a model emits reasoning and then tool calls, later continuation requests may need to replay the reasoning content in the exact provider-compatible message shape. Missing replay can cause provider rejection.
+
+### 24.1 Protocol Representation
+
+DeepOmni protocol must separate answer text from reasoning text:
+
+```text
+assistant.reasoning.delta
+assistant.reasoning.completed
+assistant.message.delta
+assistant.message.completed
+tool.call.started
+```
+
+Reasoning event payload:
+
+```json
+{
+  "turn_id": "turn_123",
+  "message_id": "msg_456",
+  "provider": "deepseek",
+  "delta": "thinking text chunk",
+  "visibility": "host_renderable",
+  "replay_required": true
+}
+```
+
+The host may choose not to render reasoning, but it must not discard persisted reasoning events.
+
+### 24.2 Provider Adapter Responsibility
+
+`deepomni-provider-deepseek` owns:
+
+- Parsing provider reasoning deltas.
+- Marking reasoning blocks as replay-required when the provider requires it.
+- Serializing replay-required reasoning content in continuation requests.
+- Fixture tests for reasoning-only, reasoning-plus-answer, reasoning-plus-tool-call, and tool-call-continuation cases.
+
+`deepomni-agent` owns:
+
+- Persisting reasoning events.
+- Associating reasoning blocks with the assistant message and turn.
+- Passing provider replay material back to the provider adapter during continuation.
+
+`deepomni-protocol` owns:
+
+- Stable reasoning event types.
+- Reasoning metadata fields that are safe for hosts.
+
+### 24.3 P0 Tests
+
+- Streaming fixture emits `assistant.reasoning.delta` before `assistant.message.delta`.
+- Tool-call fixture persists a completed reasoning block before tool execution.
+- Continuation fixture includes replay-required reasoning content.
+- Missing replay fixture fails in provider adapter tests before it can reach live API.
+
+## 25. Context Token Budget Model
+
+Token budgeting is a P0 runtime requirement because it controls cost, correctness, and long-context reliability.
+
+### 25.1 Budget Inputs
+
+Each turn receives:
+
+- provider context window.
+- configured max input tokens.
+- configured max output tokens.
+- reserved reasoning/output budget.
+- tool schema budget.
+- system prompt budget.
+- skill/plugin budget.
+- history budget.
+- safety margin.
+
+### 25.2 Default Budget Allocation
+
+Initial V1 allocation:
+
+```text
+total_input_budget
+├── 10% system and safety instructions
+├── 10% tool schemas and capability summaries
+├── 10% active skills and plugin instructions
+├── 65% conversation history and tool results
+└── 5% safety margin
+```
+
+For small models or small configured budgets, fixed minimums can override percentages. Budget decisions must be emitted in debug metadata.
+
+### 25.3 Overflow Strategy
+
+Deterministic V1 overflow order:
+
+1. Drop low-priority plugin capability summaries.
+2. Drop inactive skill descriptions.
+3. Truncate large tool outputs to summaries or blob references.
+4. Compact older conversation history.
+5. Preserve the latest user message, active tool-call continuation material, replay-required reasoning, and safety/system instructions.
+
+Never drop:
+
+- current user input.
+- provider-required reasoning replay.
+- pending tool call/result pairs needed for continuation.
+- system safety and permission instructions.
+
+### 25.4 DeepSeek Context Windows
+
+V1 target:
+
+- Production-reliable 100k-token-equivalent context assembly.
+- Design-compatible with 1M-token windows.
+- 1M optimization can be P1/P2 after deterministic budget behavior exists.
+
+Reason:
+
+- A huge context window does not remove the need for budgeting. Tool schemas, skills, reasoning replay, and history still need predictable cost and latency behavior.
+
+## 26. Minimal Sub-Agent Protocol
+
+Sub-agents are a core capability, but V1 should define the smallest protocol that avoids future rework.
+
+### 26.1 Primitives
+
+V1 protocol primitives:
+
+```text
+agent_spawn
+agent_result
+agent_cancel
+```
+
+P0 can implement only `agent_spawn` and `agent_result` with mock-provider support. `agent_cancel` should be reserved in protocol and implemented when cancellation registry is ready.
+
+### 26.2 Parent-Child Model
+
+- A child agent is represented as a child thread or child turn with `parent_thread_id`, `parent_turn_id`, and `subagent_id`.
+- Child agent events are persisted in their own sequence and summarized into parent events through `subagent.spawned`, `subagent.completed`, and `subagent.failed`.
+- Parent turn receives child result as a structured tool result.
+
+### 26.3 Permission and Context Rules
+
+- Child permissions must be less than or equal to parent permissions.
+- Child workspace must be equal to or narrower than parent workspace.
+- Child model may be overridden only if allowed by parent runtime config.
+- Child context starts from a bounded task prompt plus selected parent context, not the entire parent history by default.
+- Child tools are a capability snapshot derived from the parent snapshot.
+
+### 26.4 P0 Tests
+
+- Parent can spawn one child agent and receive result.
+- Child cannot request broader filesystem or network permissions than parent.
+- Child events can be replayed independently.
+- Parent event stream includes sub-agent summary events.
+
+## 27. Full Request Sequence
+
+The sequence below is the reference flow for a normal hosted request that streams reasoning, requests a tool, receives approval, continues with tool results, and completes.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Host as Host Client
+    participant Server as deepomni-server
+    participant Runtime as deepomni-runtime
+    participant Thread as ThreadManager
+    participant Context as ContextManager
+    participant Provider as DeepSeek Provider
+    participant Events as EventBus/State
+    participant Policy as Policy Engine
+    participant Tools as Tool Orchestrator
+    participant Sandbox as Sandbox
+
+    Host->>Server: POST /v1/threads/:id/turns
+    Server->>Runtime: submit_turn(thread_id, input)
+    Runtime->>Thread: acquire active-turn slot
+    Runtime->>Events: persist turn.started
+    Runtime->>Context: build context with token budget
+    Context-->>Runtime: context + budget debug metadata
+    Runtime->>Provider: stream_chat(context)
+    Provider-->>Runtime: reasoning delta
+    Runtime->>Events: assistant.reasoning.delta
+    Events-->>Host: SSE reasoning delta
+    Provider-->>Runtime: tool call arguments delta
+    Runtime->>Events: tool.call.arguments.delta
+    Provider-->>Runtime: tool call completed
+    Runtime->>Tools: validate and prepare tool call
+    Tools->>Policy: evaluate permission and sandbox policy
+    Policy-->>Tools: needs approval
+    Tools->>Events: tool.call.requires_approval
+    Events-->>Host: SSE approval request
+    Host->>Server: POST approve
+    Server->>Runtime: approve_tool_call
+    Runtime->>Tools: continue approved tool call
+    Tools->>Sandbox: execute under selected sandbox
+    Sandbox-->>Tools: tool output
+    Tools->>Events: tool.call.completed
+    Events-->>Host: SSE tool result summary
+    Runtime->>Provider: continue with tool result + reasoning replay
+    Provider-->>Runtime: final answer delta
+    Runtime->>Events: assistant.message.delta
+    Provider-->>Runtime: end turn
+    Runtime->>Events: turn.completed
+    Runtime->>Thread: release active-turn slot
+    Events-->>Host: SSE turn.completed
+```
+
+Design checks enforced by this sequence:
+
+- Context budget is computed before provider request.
+- Reasoning is a first-class persisted event.
+- Tool calls cannot bypass policy.
+- Approval is host-driven, not provider-driven.
+- Tool continuation includes provider-required reasoning replay.
+- Event stream is sufficient for CLI, desktop, mobile, and remote clients.
