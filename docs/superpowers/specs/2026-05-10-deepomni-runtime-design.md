@@ -1232,6 +1232,9 @@ Integration tests:
 - Resume thread from state.
 - SSE replay.
 - MCP fake server tool call.
+- Parent spawns child sub-agent, child completes, and parent receives structured result.
+- Parent cancels child sub-agent mid-execution.
+- Child failure surfaces correctly in the parent event stream.
 
 Golden tests:
 
@@ -1368,15 +1371,9 @@ Exit criteria:
 - Computer Use plugin can be discovered but remains disabled by default.
 - Remote executor protocol has documented test fixtures.
 
-## 14. Open Questions
+## 14. Decision Register
 
-- Should V1 use SQLite only, or SQLite plus append-only JSONL event logs?
-- Should plugin manifests use JSON only, or support TOML as a first-class format?
-- Should the runtime API align more closely with DeepSeek-TUI `/v1/threads` or Codex app-server protocol names?
-- How much upstream Codex code can be source-adapted under license and maintenance constraints?
-- Should remote server mode support multi-user auth in V1, or only single-token deployment?
-
-## 15. Recommended Decisions
+Settled recommendations:
 
 - Use Rust core for V1.
 - Use SQLite as the primary state store, with optional event JSONL export later.
@@ -1386,11 +1383,13 @@ Exit criteria:
 - Keep Computer Use as a plugin boundary from day one.
 - Build test support first so runtime behavior can be developed with deterministic mock providers.
 
-## 16. Review Addendum: Product Scenarios and Production Architecture
+Open decisions are tracked in §22 so the document has one active list of unresolved architecture questions.
+
+## 15. Review Addendum: Product Scenarios and Production Architecture
 
 This section addresses the first detailed design review. It tightens the PRD around user stories, execution priority, concurrency safety, error boundaries, success metrics, and plugin/skill flow.
 
-### 16.1 Core User Stories
+### 15.1 Core User Stories
 
 User stories are the reason the runtime boundaries exist. V1 should be validated against these scenarios before implementation details are considered stable.
 
@@ -1449,11 +1448,11 @@ Acceptance criteria:
 - State survives process restart.
 - Errors are classified as user-visible, retryable, policy-denied, provider, tool, state, or internal.
 
-## 17. Priority Model
+## 16. Priority Model
 
 The milestone list is ordered, but implementation work should be classified by priority so parallel work does not blur production criteria.
 
-### 17.1 P0: Runtime Contract and Safety
+### 16.1 P0: Runtime Contract and Safety
 
 P0 items block all later work:
 
@@ -1477,7 +1476,7 @@ P0 exit criteria:
 - One mutating tool requires approval and can be approved/rejected.
 - State can replay thread events after restart.
 
-### 17.2 P1: DeepSeek and Built-in Tools
+### 16.2 P1: DeepSeek and Built-in Tools
 
 P1 items make the runtime useful:
 
@@ -1495,7 +1494,7 @@ P1 exit criteria:
 - Built-in tools have temp-workspace integration tests.
 - Provider parser has fixture tests for streaming deltas and tool calls.
 
-### 17.3 P2: Extensions
+### 16.3 P2: Extensions
 
 P2 items make the platform extensible:
 
@@ -1512,7 +1511,7 @@ P2 exit criteria:
 - Plugin enable/disable changes runtime capability introspection.
 - Computer Use permissions exist but remain disabled by default.
 
-### 17.4 Parallelization Guidance
+### 16.4 Parallelization Guidance
 
 Can run in parallel:
 
@@ -1528,9 +1527,9 @@ Must be sequential:
 - Policy/orchestrator before mutating built-in tools.
 - Plugin manifest before plugin-contributed skills/MCP.
 
-## 18. Core and Config Crate Decision
+## 17. Core and Config Crate Decision
 
-### 18.1 Add `deepomni-core`
+### 17.1 Add `deepomni-core`
 
 DeepOmni should add a small `deepomni-core` crate, but it must stay intentionally boring. It is a foundation crate, not an application core.
 
@@ -1565,7 +1564,7 @@ Rationale:
 - Codex has many small utility crates plus a large `core`; DeepSeek-TUI has a `core` crate but also splits `config`, `protocol`, and `state`.
 - DeepOmni should avoid a large catch-all `core`. `deepomni-runtime` owns orchestration. `deepomni-core` owns only shared framework primitives.
 
-### 18.2 Add `deepomni-config`
+### 17.2 Add `deepomni-config`
 
 DeepOmni should add a first-class `deepomni-config` crate.
 
@@ -1603,7 +1602,7 @@ Testing:
 - Workspace override tests.
 - Invalid model/provider tests.
 
-### 18.3 Dependency Rule
+### 17.3 Dependency Rule
 
 Recommended dependency direction:
 
@@ -1617,9 +1616,9 @@ server/sdk hosts   -> protocol + runtime + config
 
 If `deepomni-core` starts accumulating business logic, split that logic into a domain crate instead of expanding core.
 
-## 19. Concurrency and Async Runtime Model
+## 18. Concurrency and Async Runtime Model
 
-### 19.1 Runtime Choice
+### 18.1 Runtime Choice
 
 Use Tokio as the async runtime for V1.
 
@@ -1629,7 +1628,7 @@ Reasons:
 - Codex and DeepSeek-TUI both operate in async Rust ecosystems.
 - Agent turns, provider streams, tool execution, and event broadcasting are naturally async.
 
-### 19.2 Ownership Model
+### 18.2 Ownership Model
 
 Top-level runtime state:
 
@@ -1654,7 +1653,7 @@ Rules:
 - Event payloads must be owned values, not borrowed references.
 - Do not hold locks across `.await` unless the lock is an async lock and the critical section is intentionally small.
 
-### 19.3 Thread and Turn Concurrency
+### 18.3 Thread and Turn Concurrency
 
 Default model:
 
@@ -1672,7 +1671,7 @@ Controls:
 - per-tool timeout.
 - per-turn timeout.
 
-### 19.4 Channel Design
+### 18.4 Channel Design
 
 Recommended primitives:
 
@@ -1684,7 +1683,7 @@ Recommended primitives:
 
 The event bus must not rely only on broadcast channels. Broadcast is best-effort for live subscribers; persisted events are the source of truth.
 
-### 19.5 Lock Strategy
+### 18.5 Lock Strategy
 
 Recommended:
 
@@ -1701,9 +1700,9 @@ Testing:
 - Event ordering tests under concurrent tool completion.
 - Cancellation tests for provider stream and shell tool.
 
-## 20. Error Handling Strategy
+## 19. Error Handling Strategy
 
-### 20.1 Error Taxonomy
+### 19.1 Error Taxonomy
 
 `deepomni-core` should define:
 
@@ -1735,7 +1734,7 @@ Each error should carry:
 - redaction status.
 - optional source error.
 
-### 20.2 Boundary Rules
+### 19.2 Boundary Rules
 
 Provider boundary:
 
@@ -1761,7 +1760,7 @@ Agent-loop boundary:
 - Fatal runtime/state/provider failures stop the turn and emit `turn.failed`.
 - Invalid model tool arguments produce a structured validation error that can be returned to the model once; repeated invalid arguments should fail the turn.
 
-### 20.3 Retry Strategy
+### 19.3 Retry Strategy
 
 Retryable:
 
@@ -1780,11 +1779,11 @@ Not retryable by default:
 
 Retries must be bounded and observable through tracing.
 
-## 21. Success Metrics and V1 SLOs
+## 20. Success Metrics and V1 SLOs
 
 V1 is complete only when functional behavior and measurable quality targets are met.
 
-### 21.1 Runtime Performance Targets
+### 20.1 Runtime Performance Targets
 
 - Local mock provider: thread creation P50 under 50 ms.
 - Local mock provider: submit turn to first event P50 under 100 ms.
@@ -1792,21 +1791,21 @@ V1 is complete only when functional behavior and measurable quality targets are 
 - Event replay: replay 10,000 events under 500 ms on a developer laptop.
 - State persistence: append event P50 under 10 ms with SQLite WAL mode.
 
-### 21.2 Concurrency Targets
+### 20.2 Concurrency Targets
 
 - 10 concurrent mock threads complete without event ordering violations.
 - Single process can keep 100 idle threads in memory.
 - Default max active turns is configurable and enforced.
 - One runaway shell/tool cannot block unrelated threads.
 
-### 21.3 Context and Cost Targets
+### 20.3 Context and Cost Targets
 
 - Runtime can persist and reload a 100k-token-equivalent thread without loading unbounded blobs into memory.
 - Context manager exposes token budget decisions in debug metadata.
 - Provider usage events include prompt, completion, cached, and reasoning token fields when available.
 - Cost estimation is best-effort and explicitly marked unknown when pricing is absent.
 
-### 21.4 Quality Targets
+### 20.4 Quality Targets
 
 - P0/P1 crates meet documented coverage targets.
 - All public protocol event types have JSON snapshots.
@@ -1814,11 +1813,11 @@ V1 is complete only when functional behavior and measurable quality targets are 
 - Every built-in tool has failure-path tests.
 - Default test suite requires no live DeepSeek API key.
 
-## 22. Plugin, Skill, MCP, and Tool Flow
+## 21. Plugin, Skill, MCP, and Tool Flow
 
 This flow validates that plugin, skill, MCP, and tool abstractions compose correctly.
 
-### 22.1 Example Plugin
+### 21.1 Example Plugin
 
 ```text
 ~/.deepomni/plugins/github-review/
@@ -1850,7 +1849,7 @@ Manifest:
 }
 ```
 
-### 22.2 Load Sequence
+### 21.2 Load Sequence
 
 1. `deepomni-config` resolves plugin roots.
 2. `deepomni-plugin` discovers `plugin.json`.
@@ -1862,7 +1861,7 @@ Manifest:
 8. Runtime builds a capability snapshot.
 9. `/v1/plugins`, `/v1/skills`, and `/v1/mcp/tools` expose the discovered capabilities.
 
-### 22.3 Turn-Time Flow
+### 21.3 Turn-Time Flow
 
 1. User asks: "Review PR #123."
 2. Context manager sees explicit skill mention, slash command, or capability match.
@@ -1876,7 +1875,7 @@ Manifest:
 10. Tool result is persisted, emitted, and returned to the model.
 11. Post-tool hooks run and can add additional context for the next model request.
 
-### 22.4 Disable Sequence
+### 21.4 Disable Sequence
 
 When a plugin is disabled:
 
@@ -1886,23 +1885,26 @@ When a plugin is disabled:
 - Existing persisted events remain replayable.
 - Active turns continue with the capability snapshot they started with unless the host interrupts them.
 
-## 23. Updated Open Questions
+## 22. Open Architecture Questions
 
 The following decisions are now considered architectural, not cosmetic:
 
 - Long context: Should V1 target 100k-token operational reliability first, then 1M-token optimization later?
 - Tool-call validation: Should invalid model arguments be returned to the model for self-correction once, or fail immediately for mutating tools?
 - Cost control: Should every turn require a max token/cost budget, or only server/remote mode?
-- Event storage: Is SQLite event storage enough, or do we need append-only JSONL for audit/export from day one?
+- Event storage: SQLite is the V1 recommendation; do we need append-only JSONL audit/export before production server mode?
+- Manifest format: JSON is the V1 recommendation; should TOML be supported later for hand-written plugin manifests?
+- Runtime API naming: DeepSeek-TUI-style `/v1/threads` is the V1 recommendation; do we need Codex app-server compatibility aliases?
+- Upstream reuse: which Codex modules are safe and useful to source-adapt after license and maintenance review?
 - Plugin trust: Should local plugins be trusted after enablement, or should each permission class require explicit user grant?
 - Remote execution: Is V1 remote mode single-tenant token auth, or should the protocol reserve tenant/user IDs immediately?
 - Config reload: Should runtime support live config reload in V1, or require restart for config changes?
 
-## 24. DeepSeek Reasoning and Tool-Call Continuation
+## 23. DeepSeek Reasoning and Tool-Call Continuation
 
 DeepSeek reasoning is not a display-only feature. In thinking mode, reasoning content can be part of the provider-required conversation state. If a model emits reasoning and then tool calls, later continuation requests may need to replay the reasoning content in the exact provider-compatible message shape. Missing replay can cause provider rejection.
 
-### 24.1 Protocol Representation
+### 23.1 Protocol Representation
 
 DeepOmni protocol must separate answer text from reasoning text:
 
@@ -1929,7 +1931,7 @@ Reasoning event payload:
 
 The host may choose not to render reasoning, but it must not discard persisted reasoning events.
 
-### 24.2 Provider Adapter Responsibility
+### 23.2 Provider Adapter Responsibility
 
 `deepomni-provider-deepseek` owns:
 
@@ -1949,18 +1951,18 @@ The host may choose not to render reasoning, but it must not discard persisted r
 - Stable reasoning event types.
 - Reasoning metadata fields that are safe for hosts.
 
-### 24.3 P0 Tests
+### 23.3 P0 Tests
 
 - Streaming fixture emits `assistant.reasoning.delta` before `assistant.message.delta`.
 - Tool-call fixture persists a completed reasoning block before tool execution.
 - Continuation fixture includes replay-required reasoning content.
 - Missing replay fixture fails in provider adapter tests before it can reach live API.
 
-## 25. Context Token Budget Model
+## 24. Context Token Budget Model
 
 Token budgeting is a P0 runtime requirement because it controls cost, correctness, and long-context reliability.
 
-### 25.1 Budget Inputs
+### 24.1 Budget Inputs
 
 Each turn receives:
 
@@ -1974,7 +1976,7 @@ Each turn receives:
 - history budget.
 - safety margin.
 
-### 25.2 Default Budget Allocation
+### 24.2 Default Budget Allocation
 
 Initial V1 allocation:
 
@@ -1989,7 +1991,7 @@ total_input_budget
 
 For small models or small configured budgets, fixed minimums can override percentages. Budget decisions must be emitted in debug metadata.
 
-### 25.3 Overflow Strategy
+### 24.3 Overflow Strategy
 
 Deterministic V1 overflow order:
 
@@ -2006,7 +2008,7 @@ Never drop:
 - pending tool call/result pairs needed for continuation.
 - system safety and permission instructions.
 
-### 25.4 DeepSeek Context Windows
+### 24.4 DeepSeek Context Windows
 
 V1 target:
 
@@ -2018,11 +2020,23 @@ Reason:
 
 - A huge context window does not remove the need for budgeting. Tool schemas, skills, reasoning replay, and history still need predictable cost and latency behavior.
 
-## 26. Minimal Sub-Agent Protocol
+### 24.5 Compaction Strategy Gate
+
+V1 can start with deterministic truncation and summary placeholders, but Milestone 1 must not be considered complete until a separate compaction strategy document defines:
+
+- summary format and ownership.
+- when compaction runs automatically.
+- how compacted history is persisted.
+- how tool results and reasoning replay are protected from compaction.
+- how compaction quality is tested with golden fixtures.
+
+This keeps M0 focused while preventing compaction from becoming an undefined production behavior.
+
+## 25. Minimal Sub-Agent Protocol
 
 Sub-agents are a core capability, but V1 should define the smallest protocol that avoids future rework.
 
-### 26.1 Primitives
+### 25.1 Primitives
 
 V1 protocol primitives:
 
@@ -2034,13 +2048,13 @@ agent_cancel
 
 P0 can implement only `agent_spawn` and `agent_result` with mock-provider support. `agent_cancel` should be reserved in protocol and implemented when cancellation registry is ready.
 
-### 26.2 Parent-Child Model
+### 25.2 Parent-Child Model
 
 - A child agent is represented as a child thread or child turn with `parent_thread_id`, `parent_turn_id`, and `subagent_id`.
 - Child agent events are persisted in their own sequence and summarized into parent events through `subagent.spawned`, `subagent.completed`, and `subagent.failed`.
 - Parent turn receives child result as a structured tool result.
 
-### 26.3 Permission and Context Rules
+### 25.3 Permission and Context Rules
 
 - Child permissions must be less than or equal to parent permissions.
 - Child workspace must be equal to or narrower than parent workspace.
@@ -2048,14 +2062,14 @@ P0 can implement only `agent_spawn` and `agent_result` with mock-provider suppor
 - Child context starts from a bounded task prompt plus selected parent context, not the entire parent history by default.
 - Child tools are a capability snapshot derived from the parent snapshot.
 
-### 26.4 P0 Tests
+### 25.4 P0 Tests
 
 - Parent can spawn one child agent and receive result.
 - Child cannot request broader filesystem or network permissions than parent.
 - Child events can be replayed independently.
 - Parent event stream includes sub-agent summary events.
 
-## 27. Full Request Sequence
+## 26. Full Request Sequence
 
 The sequence below is the reference flow for a normal hosted request that streams reasoning, requests a tool, receives approval, continues with tool results, and completes.
 
