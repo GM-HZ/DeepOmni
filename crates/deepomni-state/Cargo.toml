@@ -1,0 +1,17 @@
+[package]
+name = "deepomni-state"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+dirs = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+deepomni-core = { path = "../deepomni-core" }
+deepomni-protocol = { path = "../deepomni-protocol" }

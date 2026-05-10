@@ -1,0 +1,22 @@
+[package]
+name = "deepomni-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+axum = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = "0.3"
+async-stream = "0.3"
+tracing = { workspace = true }
+deepomni-core = { path = "../deepomni-core" }
+deepomni-protocol = { path = "../deepomni-protocol" }
+deepomni-runtime = { path = "../deepomni-runtime" }
+deepomni-config = { path = "../deepomni-config" }
+deepomni-events = { path = "../deepomni-events" }

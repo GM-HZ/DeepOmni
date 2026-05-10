@@ -1,0 +1,73 @@
+[workspace]
+members = [
+    "crates/deepomni-core",
+    "crates/deepomni-protocol",
+    "crates/deepomni-config",
+    "crates/deepomni-runtime",
+    "crates/deepomni-agent",
+    "crates/deepomni-model-provider",
+    "crates/deepomni-provider-deepseek",
+    "crates/deepomni-tools",
+    "crates/deepomni-tool-builtin",
+    "crates/deepomni-policy",
+    "crates/deepomni-sandbox",
+    "crates/deepomni-state",
+    "crates/deepomni-events",
+    "crates/deepomni-context",
+    "crates/deepomni-skills",
+    "crates/deepomni-plugin",
+    "crates/deepomni-mcp",
+    "crates/deepomni-hooks",
+    "crates/deepomni-server",
+    "crates/deepomni-task",
+    "crates/deepomni-computer-use",
+    "crates/deepomni-cli",
+    "crates/deepomni-capabilities",
+    "crates/deepomni-prompt",
+    "crates/deepomni-test-support",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/DeepOmni/DeepOmni"
+
+[workspace.dependencies]
+# Core foundation
+thiserror = "2.0"
+anyhow = "1.0"
+tracing = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+schemars = "1.0"
+
+# IDs and time
+uuid = { version = "1.11", features = ["v4"] }
+time = { version = "0.3", features = ["serde"] }
+
+# Async runtime
+tokio = { version = "1.49", features = ["full"] }
+async-trait = "0.1"
+
+# HTTP server
+axum = { version = "0.8", features = ["json"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+tower-http = { version = "0.6", features = ["cors"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Config
+toml = "0.9"
+dirs = "6.0"
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Hashing
+sha2 = "0.10"

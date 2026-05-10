@@ -1,0 +1,23 @@
+# Rust build output
+/target/
+
+# Cargo lock for library crates (keep for binaries/applications)
+# Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# DeepOmni runtime state
+/.deepomni/

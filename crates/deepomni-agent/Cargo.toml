@@ -1,0 +1,27 @@
+[package]
+name = "deepomni-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+futures = "0.3"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+deepomni-core = { path = "../deepomni-core" }
+deepomni-protocol = { path = "../deepomni-protocol" }
+deepomni-events = { path = "../deepomni-events" }
+deepomni-model-provider = { path = "../deepomni-model-provider" }
+deepomni-tools = { path = "../deepomni-tools" }
+deepomni-policy = { path = "../deepomni-policy" }
+deepomni-context = { path = "../deepomni-context" }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+deepomni-protocol = { path = "../deepomni-protocol" }
+deepomni-test-support = { path = "../deepomni-test-support" }

@@ -1,0 +1,16 @@
+[package]
+name = "deepomni-task"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+deepomni-core = { path = "../deepomni-core" }
+deepomni-protocol = { path = "../deepomni-protocol" }

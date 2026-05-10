@@ -1,0 +1,15 @@
+[package]
+name = "deepomni-model-provider"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = "0.3"
+deepomni-core = { path = "../deepomni-core" }
+deepomni-protocol = { path = "../deepomni-protocol" }
