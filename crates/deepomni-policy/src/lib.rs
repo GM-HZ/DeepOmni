@@ -273,12 +273,11 @@ impl PolicyEngine {
         if self.dynamic_grants.read().unwrap().contains(tool_name) {
             return true;
         }
-        if let Some(tid) = thread_id {
-            if let Some(grants) = self.thread_grants.read().unwrap().get(tid) {
-                if grants.contains(tool_name) {
-                    return true;
-                }
-            }
+        if let Some(tid) = thread_id
+            && let Some(grants) = self.thread_grants.read().unwrap().get(tid)
+            && grants.contains(tool_name)
+        {
+            return true;
         }
         false
     }

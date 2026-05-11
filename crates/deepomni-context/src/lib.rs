@@ -9,7 +9,9 @@ use std::collections::VecDeque;
 
 use sha2::{Digest, Sha256};
 
+use deepomni_model_provider::ModelMessage;
 use deepomni_protocol::id::{MessageId, TurnId};
+use deepomni_protocol::Usage;
 
 /// Token budget allocation for a turn.
 ///
@@ -95,6 +97,242 @@ pub struct TokenBudgetAllocation {
     pub skills: u8,
     pub history: u8,
     pub margin: u8,
+}
+
+// ── Context manager ──
+
+/// Policy applied when recording new transcript items.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum TruncationPolicy {
+    /// Append all items exactly as supplied.
+    #[default]
+    None,
+    /// Keep only the newest `max_items` transcript items.
+    KeepLast { max_items: usize },
+    /// Keep newest items whose estimated token total fits within `max_tokens`.
+    TokenBudget { max_tokens: u64 },
+}
+
+/// Snapshot of prompt history and token state for rollback/compaction.
+#[derive(Debug, Clone)]
+pub struct ContextSnapshot {
+    pub items: Vec<ModelMessage>,
+    pub history_version: u64,
+    pub token_info: Option<TokenUsageInfo>,
+}
+
+/// Token accounting captured from the last provider response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenUsageInfo {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub context_window: Option<u64>,
+}
+
+/// Token-aware conversation history owner.
+#[derive(Debug, Clone, Default)]
+pub struct ContextManager {
+    items: Vec<ModelMessage>,
+    history_version: u64,
+    token_info: Option<TokenUsageInfo>,
+    reference_context: Option<ContextSnapshot>,
+}
+
+impl ContextManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn from_items(items: Vec<ModelMessage>) -> Self {
+        Self {
+            items,
+            ..Self::default()
+        }
+    }
+
+    pub fn record_items(&mut self, items: &[ModelMessage], policy: TruncationPolicy) {
+        self.items.extend_from_slice(items);
+        self.apply_truncation(policy);
+    }
+
+    pub fn for_prompt(&self) -> Vec<ModelMessage> {
+        self.items.clone()
+    }
+
+    pub fn replace_history(&mut self, items: Vec<ModelMessage>) {
+        self.items = items;
+        self.history_version = self.history_version.saturating_add(1);
+    }
+
+    pub fn update_token_info(&mut self, usage: &Usage, context_window: Option<u64>) {
+        self.token_info = Some(TokenUsageInfo {
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            total_tokens: usage.total(),
+            context_window,
+        });
+    }
+
+    pub fn needs_compaction(&self, threshold: f64) -> bool {
+        let Some(info) = &self.token_info else {
+            return false;
+        };
+        let Some(window) = info.context_window else {
+            return false;
+        };
+        if window == 0 {
+            return false;
+        }
+        (info.total_tokens as f64 / window as f64) >= threshold
+    }
+
+    pub fn snapshot(&self) -> ContextSnapshot {
+        ContextSnapshot {
+            items: self.items.clone(),
+            history_version: self.history_version,
+            token_info: self.token_info.clone(),
+        }
+    }
+
+    pub fn set_reference_context(&mut self) {
+        self.reference_context = Some(self.snapshot());
+    }
+
+    pub fn reference_context(&self) -> Option<&ContextSnapshot> {
+        self.reference_context.as_ref()
+    }
+
+    pub fn history_version(&self) -> u64 {
+        self.history_version
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    fn apply_truncation(&mut self, policy: TruncationPolicy) {
+        match policy {
+            TruncationPolicy::None => {}
+            TruncationPolicy::KeepLast { max_items } => {
+                let excess = self.items.len().saturating_sub(max_items);
+                if excess > 0 {
+                    self.items.drain(0..excess);
+                    self.history_version = self.history_version.saturating_add(1);
+                }
+            }
+            TruncationPolicy::TokenBudget { max_tokens } => {
+                while estimated_messages_tokens(&self.items) > max_tokens && self.items.len() > 1 {
+                    self.items.remove(0);
+                    self.history_version = self.history_version.saturating_add(1);
+                }
+            }
+        }
+    }
+}
+
+fn estimated_messages_tokens(items: &[ModelMessage]) -> u64 {
+    items
+        .iter()
+        .map(|item| {
+            let content = item.content.as_deref().unwrap_or_default().len();
+            let reasoning = item.reasoning_content.as_deref().unwrap_or_default().len();
+            let tool_calls = item
+                .tool_calls
+                .iter()
+                .map(|call| call.arguments.to_string().len() + call.tool_name.len())
+                .sum::<usize>();
+            ((content + reasoning + tool_calls) as u64).div_ceil(4).max(1)
+        })
+        .sum()
+}
+
+#[cfg(test)]
+mod context_manager_tests {
+    use super::*;
+    use deepomni_model_provider::MessageRole;
+
+    fn message(role: MessageRole, content: &str) -> ModelMessage {
+        ModelMessage {
+            role,
+            content: Some(content.to_string()),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            reasoning_content: None,
+        }
+    }
+
+    #[test]
+    fn records_items_and_preserves_prompt_order() {
+        let mut manager = ContextManager::new();
+        manager.record_items(
+            &[
+                message(MessageRole::User, "first"),
+                message(MessageRole::Assistant, "second"),
+            ],
+            TruncationPolicy::None,
+        );
+
+        let prompt = manager.for_prompt();
+        assert_eq!(prompt.len(), 2);
+        assert_eq!(prompt[0].content.as_deref(), Some("first"));
+        assert_eq!(prompt[1].content.as_deref(), Some("second"));
+        assert_eq!(manager.history_version(), 0);
+    }
+
+    #[test]
+    fn keep_last_policy_truncates_oldest_items_and_bumps_version() {
+        let mut manager = ContextManager::new();
+        manager.record_items(
+            &[
+                message(MessageRole::User, "one"),
+                message(MessageRole::Assistant, "two"),
+                message(MessageRole::User, "three"),
+            ],
+            TruncationPolicy::KeepLast { max_items: 2 },
+        );
+
+        let prompt = manager.for_prompt();
+        assert_eq!(prompt.len(), 2);
+        assert_eq!(prompt[0].content.as_deref(), Some("two"));
+        assert_eq!(prompt[1].content.as_deref(), Some("three"));
+        assert_eq!(manager.history_version(), 1);
+    }
+
+    #[test]
+    fn replace_history_increments_version_and_updates_snapshot() {
+        let mut manager = ContextManager::new();
+        manager.record_items(&[message(MessageRole::User, "old")], TruncationPolicy::None);
+        manager.replace_history(vec![message(MessageRole::User, "summary")]);
+        manager.set_reference_context();
+
+        assert_eq!(manager.history_version(), 1);
+        assert_eq!(manager.reference_context().unwrap().items.len(), 1);
+        assert_eq!(
+            manager.reference_context().unwrap().items[0].content.as_deref(),
+            Some("summary")
+        );
+    }
+
+    #[test]
+    fn compaction_threshold_uses_last_usage_window() {
+        let mut manager = ContextManager::new();
+        manager.update_token_info(
+            &Usage {
+                prompt_tokens: 750,
+                completion_tokens: 50,
+                ..Default::default()
+            },
+            Some(1000),
+        );
+
+        assert!(manager.needs_compaction(0.8));
+        assert!(!manager.needs_compaction(0.9));
+    }
 }
 
 // ── Context fragment ──

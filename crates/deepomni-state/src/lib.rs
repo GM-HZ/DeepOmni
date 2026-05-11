@@ -7,11 +7,14 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 // Re-export protocol types used in stored records.
 use deepomni_protocol::{EventFrame, TurnItem};
+use deepomni_journal::{JournalEntry, JournalError, JournalRecord, JournalSubscriber, TurnJournal};
 
 /// Default state database path: `~/.deepomni/state.db`.
 pub fn default_state_db_path() -> PathBuf {
@@ -112,6 +115,7 @@ pub struct PluginStateRecord {
 #[derive(Debug, Clone)]
 pub struct StateStore {
     db_path: PathBuf,
+    journal_senders: Arc<Mutex<HashMap<String, tokio::sync::broadcast::Sender<JournalRecord>>>>,
 }
 
 impl StateStore {
@@ -124,7 +128,10 @@ impl StateStore {
                 message: e.to_string(),
             })?;
         }
-        let store = Self { db_path };
+        let store = Self {
+            db_path,
+            journal_senders: Arc::new(Mutex::new(HashMap::new())),
+        };
         store.init_schema()?;
         store.run_migrations()?;
         Ok(store)
@@ -220,6 +227,19 @@ impl StateStore {
                 FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_turn_items_turn ON turn_items(turn_id, seq ASC);
+
+            CREATE TABLE IF NOT EXISTS journal_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT NOT NULL,
+                turn_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                entry_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE,
+                UNIQUE(thread_id, seq)
+            );
+            CREATE INDEX IF NOT EXISTS idx_journal_entries_thread_seq ON journal_entries(thread_id, seq ASC);
+            CREATE INDEX IF NOT EXISTS idx_journal_entries_turn ON journal_entries(turn_id, seq ASC);
 
             CREATE TABLE IF NOT EXISTS pending_approvals (
                 approval_id TEXT PRIMARY KEY,
@@ -602,6 +622,55 @@ impl StateStore {
         Ok(items)
     }
 
+    /// Replay journal records for a single turn. This is used for approval
+    /// resume transcript reconstruction while the public journal trait remains
+    /// thread-oriented for SSE replay.
+    pub fn get_journal_records_for_turn(
+        &self,
+        turn_id: &str,
+    ) -> Result<Vec<JournalRecord>, StateError> {
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT seq, thread_id, turn_id, entry_json, created_at FROM journal_entries WHERE turn_id = ?1 ORDER BY seq ASC",
+            )
+            .map_err(|e| StateError::QueryError {
+                message: format!("failed to prepare get_journal_records_for_turn: {e}"),
+            })?;
+        let rows = stmt
+            .query_map(params![turn_id], |row| {
+                let seq: i64 = row.get(0)?;
+                let thread_id: String = row.get(1)?;
+                let turn_id: String = row.get(2)?;
+                let entry_json: String = row.get(3)?;
+                let created_at: i64 = row.get(4)?;
+                Ok((seq, thread_id, turn_id, entry_json, created_at))
+            })
+            .map_err(|e| StateError::QueryError {
+                message: format!("failed to get journal records for turn: {e}"),
+            })?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            let (seq, thread_id, turn_id, entry_json, created_at) =
+                row.map_err(|e| StateError::QueryError {
+                    message: format!("failed to read journal turn row: {e}"),
+                })?;
+            let entry = serde_json::from_str::<JournalEntry>(&entry_json)
+                .map_err(|e| StateError::QueryError {
+                    message: format!("failed to deserialize journal entry: {e}"),
+                })?;
+            records.push(JournalRecord {
+                seq,
+                thread_id: deepomni_protocol::ThreadId::from_string(&thread_id),
+                turn_id: deepomni_protocol::TurnId::from_string(&turn_id),
+                entry,
+                created_at,
+            });
+        }
+        Ok(records)
+    }
+
     // ── Pending approval operations ──
 
     /// Persist a pending approval record for later resume.
@@ -721,6 +790,166 @@ impl StateStore {
     }
 }
 
+impl TurnJournal for StateStore {
+    fn append(
+        &self,
+        thread_id: &deepomni_protocol::ThreadId,
+        turn_id: &deepomni_protocol::TurnId,
+        entry: JournalEntry,
+    ) -> Result<JournalRecord, JournalError> {
+        let conn = self
+            .conn()
+            .map_err(|e| JournalError::Storage(format!("{e}")))?;
+        conn.execute("BEGIN IMMEDIATE", [])
+            .map_err(|e| JournalError::Storage(format!("begin tx: {e}")))?;
+
+        let result = (|| {
+            let max_seq: Option<i64> = conn
+                .query_row(
+                    "SELECT MAX(seq) FROM journal_entries WHERE thread_id = ?1",
+                    params![thread_id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| JournalError::Storage(format!("failed to get journal max seq: {e}")))?
+                .flatten();
+            let seq = max_seq.unwrap_or(0) + 1;
+            let created_at = current_timestamp();
+            let entry_json = serde_json::to_string(&entry)
+                .map_err(|e| JournalError::Serialization(format!("{e}")))?;
+
+            conn.execute(
+                r#"
+                INSERT INTO journal_entries (thread_id, turn_id, seq, entry_json, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                "#,
+                params![thread_id.as_str(), turn_id.as_str(), seq, entry_json, created_at],
+            )
+            .map_err(|e| JournalError::Storage(format!("failed to append journal entry: {e}")))?;
+
+            match &entry {
+                JournalEntry::ApprovalPending {
+                    call_id,
+                    approval_id,
+                    tool_name,
+                    arguments,
+                    model,
+                    workspace,
+                    config_json,
+                    ..
+                } => {
+                    let arguments_json = serde_json::to_string(arguments)
+                        .map_err(|e| JournalError::Serialization(format!("{e}")))?;
+                    conn.execute(
+                        "INSERT OR REPLACE INTO pending_approvals (approval_id, thread_id, turn_id, call_id, tool_name, arguments_json, model, workspace, config_json, status, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'pending',?10)",
+                        params![
+                            approval_id,
+                            thread_id.as_str(),
+                            turn_id.as_str(),
+                            call_id.as_str(),
+                            tool_name,
+                            arguments_json,
+                            model,
+                            workspace,
+                            config_json,
+                            created_at,
+                        ],
+                    )
+                    .map_err(|e| JournalError::Storage(format!("project pending approval: {e}")))?;
+                }
+                JournalEntry::ApprovalResolved {
+                    approval_id,
+                    approved,
+                } => {
+                    let status = if *approved { "approved" } else { "rejected" };
+                    conn.execute(
+                        "UPDATE pending_approvals SET status = ?1 WHERE approval_id = ?2",
+                        params![status, approval_id],
+                    )
+                    .map_err(|e| JournalError::Storage(format!("project approval resolution: {e}")))?;
+                }
+                _ => {}
+            }
+
+            Ok(JournalRecord {
+                seq,
+                thread_id: thread_id.clone(),
+                turn_id: turn_id.clone(),
+                entry,
+                created_at,
+            })
+        })();
+
+        match result {
+            Ok(record) => {
+                conn.execute("COMMIT", [])
+                    .map_err(|e| JournalError::Storage(format!("commit tx: {e}")))?;
+                if let Ok(senders) = self.journal_senders.lock()
+                    && let Some(sender) = senders.get(thread_id.as_str())
+                {
+                    let _ = sender.send(record.clone());
+                }
+                Ok(record)
+            }
+            Err(e) => {
+                let _ = conn.execute("ROLLBACK", []);
+                Err(e)
+            }
+        }
+    }
+
+    fn replay(
+        &self,
+        thread_id: &deepomni_protocol::ThreadId,
+        since_seq: i64,
+    ) -> Result<Vec<JournalRecord>, JournalError> {
+        let conn = self
+            .conn()
+            .map_err(|e| JournalError::Storage(format!("{e}")))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT seq, turn_id, entry_json, created_at FROM journal_entries WHERE thread_id = ?1 AND seq > ?2 ORDER BY seq ASC",
+            )
+            .map_err(|e| JournalError::Storage(format!("prepare journal replay: {e}")))?;
+        let rows = stmt
+            .query_map(params![thread_id.as_str(), since_seq], |row| {
+                let seq: i64 = row.get(0)?;
+                let turn_id: String = row.get(1)?;
+                let entry_json: String = row.get(2)?;
+                let created_at: i64 = row.get(3)?;
+                Ok((seq, turn_id, entry_json, created_at))
+            })
+            .map_err(|e| JournalError::Storage(format!("query journal replay: {e}")))?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            let (seq, turn_id, entry_json, created_at) =
+                row.map_err(|e| JournalError::Storage(format!("read journal row: {e}")))?;
+            let entry = serde_json::from_str::<JournalEntry>(&entry_json)
+                .map_err(|e| JournalError::Serialization(format!("{e}")))?;
+            records.push(JournalRecord {
+                seq,
+                thread_id: thread_id.clone(),
+                turn_id: deepomni_protocol::TurnId::from_string(&turn_id),
+                entry,
+                created_at,
+            });
+        }
+        Ok(records)
+    }
+
+    fn subscribe(&self, thread_id: deepomni_protocol::ThreadId) -> JournalSubscriber {
+        let sender = {
+            let mut senders = self.journal_senders.lock().expect("journal sender mutex poisoned");
+            senders
+                .entry(thread_id.to_string())
+                .or_insert_with(|| tokio::sync::broadcast::channel(256).0)
+                .clone()
+        };
+        deepomni_journal::subscriber(thread_id.clone(), sender.subscribe())
+    }
+}
+
 // ── Helpers ──
 
 fn bool_to_i64(b: bool) -> i64 {
@@ -798,8 +1027,7 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("deepomni-test-{}.db", uuid::Uuid::new_v4()));
         // Clean up after test.
         let path = Some(tmp.clone());
-        let store = StateStore::open(path).unwrap();
-        store
+        StateStore::open(path).unwrap()
     }
 
     #[test]

@@ -3,9 +3,8 @@
 
 use std::sync::Arc;
 
-use deepomni_agent::{TurnConfig, TurnResult, TurnRunner};
-use deepomni_events::EventBus;
-use deepomni_model_provider::ModelProvider;
+use deepomni_agent::{TurnConfig, TurnRunner};
+use deepomni_journal::InMemoryJournal;
 use deepomni_policy::{AgentMode, PermissionProfile, PolicyEngine};
 use deepomni_protocol::id::{ThreadId, TurnId};
 use deepomni_protocol::tool::ToolOutput;
@@ -31,8 +30,8 @@ async fn test_subagent_spawn_and_complete() {
         r
     });
     let policy = Arc::new(PolicyEngine::new(AgentMode::Trusted, PermissionProfile::new()));
-    let events = Arc::new(EventBus::new());
-    let runner = Arc::new(TurnRunner::new(registry.clone(), policy.clone(), events.clone()));
+    let journal = Arc::new(InMemoryJournal::new());
+    let runner = Arc::new(TurnRunner::new(registry.clone(), policy.clone(), journal));
 
     let provider = Arc::new(MockModelProvider::new(vec![
         mock_text_response("sub-agent result: found 3 issues"),
@@ -69,8 +68,8 @@ async fn test_subagent_failure() {
         r
     });
     let policy = Arc::new(PolicyEngine::new(AgentMode::Trusted, PermissionProfile::new()));
-    let events = Arc::new(EventBus::new());
-    let runner = Arc::new(TurnRunner::new(registry, policy, events));
+    let journal = Arc::new(InMemoryJournal::new());
+    let runner = Arc::new(TurnRunner::new(registry, policy, journal));
 
     // Mock that returns nothing usable — stream ends immediately.
     let provider = Arc::new(MockModelProvider::new(vec![

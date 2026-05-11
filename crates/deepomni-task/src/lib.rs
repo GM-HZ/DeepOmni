@@ -8,11 +8,10 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, RwLock, Semaphore};
-use tracing::{debug, info, warn};
+use tokio::sync::{RwLock, Semaphore};
+use tracing::{info, warn};
 
 /// Task lifecycle status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +89,7 @@ impl TaskRecord {
 
 /// A task execution function.
 pub type TaskFn = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send>;
+type PersistFn = Arc<dyn Fn(&TaskRecord) + Send + Sync>;
 
 /// Manages a durable background task queue with retry and worker pool.
 pub struct TaskManager {
@@ -98,7 +98,7 @@ pub struct TaskManager {
     concurrency_limit: usize,
     semaphore: Arc<Semaphore>,
     /// Callback to persist task state.
-    persist_fn: Option<Arc<dyn Fn(&TaskRecord) + Send + Sync>>,
+    persist_fn: Option<PersistFn>,
 }
 
 impl TaskManager {
@@ -109,6 +109,10 @@ impl TaskManager {
             semaphore: Arc::new(Semaphore::new(concurrency_limit)),
             persist_fn: None,
         }
+    }
+
+    pub fn concurrency_limit(&self) -> usize {
+        self.concurrency_limit
     }
 
     pub fn with_persistence<F>(mut self, f: F) -> Self
@@ -186,13 +190,13 @@ impl TaskManager {
     /// Cancel a task.
     pub async fn cancel(&self, task_id: &str) -> bool {
         let mut guard = self.tasks.write().await;
-        if let Some(record) = guard.get_mut(task_id) {
-            if !record.status.is_terminal() {
-                record.status = TaskStatus::Cancelled;
-                record.updated_at = current_timestamp();
-                if let Some(ref p) = self.persist_fn { p(record); }
-                return true;
-            }
+        if let Some(record) = guard.get_mut(task_id)
+            && !record.status.is_terminal()
+        {
+            record.status = TaskStatus::Cancelled;
+            record.updated_at = current_timestamp();
+            if let Some(ref p) = self.persist_fn { p(record); }
+            return true;
         }
         false
     }
@@ -222,10 +226,10 @@ impl TaskManager {
         Fut: Future<Output = Result<(), String>> + Send,
     {
         let record = self.get(task_id).await;
-        if let Some(rec) = record {
-            if rec.status == TaskStatus::Queued && rec.retry.should_retry() {
-                self.spawn(task_id, f).await;
-            }
+        if let Some(rec) = record
+            && rec.status == TaskStatus::Queued && rec.retry.should_retry()
+        {
+            self.spawn(task_id, f).await;
         }
     }
 }
@@ -247,6 +251,7 @@ fn current_timestamp_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test_enqueue_and_get() {

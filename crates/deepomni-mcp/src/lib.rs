@@ -35,16 +35,20 @@ struct JsonRpcRequest {
 #[derive(Debug, Deserialize)]
 struct JsonRpcResponse {
     #[serde(default)]
+    #[allow(dead_code)]
     id: Option<u64>,
     #[serde(default)]
     result: Option<Value>,
     #[serde(default)]
+    #[allow(dead_code)]
     error: Option<JsonRpcError>,
 }
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcError {
+    #[allow(dead_code)]
     code: i64,
+    #[allow(dead_code)]
     message: String,
 }
 
@@ -74,6 +78,7 @@ pub enum McpServerStatus {
 
 /// An MCP server instance (stdio transport).
 struct McpServer {
+    #[allow(dead_code)]
     name: String,
     command: String,
     args: Vec<String>,
@@ -264,14 +269,13 @@ impl McpManager {
         for name in &server_names {
             let tools = self.start(name).await?;
             for tool_spec in tools {
-                if let ToolSpec::Function(details) = &tool_spec {
-                    let handler = Arc::new(McpToolHandler {
-                        server_name: name.clone(),
-                        tool_name: details.name.clone(),
-                    });
-                    registry.register(handler).await;
-                    total += 1;
-                }
+                let ToolSpec::Function(details) = &tool_spec;
+                let handler = Arc::new(McpToolHandler {
+                    server_name: name.clone(),
+                    tool_name: details.name.clone(),
+                });
+                registry.register(handler).await;
+                total += 1;
             }
         }
 

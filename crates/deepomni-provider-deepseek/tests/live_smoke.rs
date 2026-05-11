@@ -1,8 +1,6 @@
 //! Live smoke test for DeepSeek provider. Requires DEEPSEEK_API_KEY env.
 //! Run with: cargo test --test live_smoke -- --ignored --nocapture
 
-use std::sync::Arc;
-
 use deepomni_model_provider::{MessageRole, ModelDelta, ModelMessage, ModelProvider, ModelRequest};
 use deepomni_provider_deepseek::DeepSeekProvider;
 

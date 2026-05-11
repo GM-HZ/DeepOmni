@@ -18,7 +18,9 @@ deepomni-core = { path = "../deepomni-core" }
 deepomni-protocol = { path = "../deepomni-protocol" }
 deepomni-config = { path = "../deepomni-config" }
 deepomni-agent = { path = "../deepomni-agent" }
+deepomni-context = { path = "../deepomni-context" }
 deepomni-events = { path = "../deepomni-events" }
+deepomni-journal = { path = "../deepomni-journal" }
 deepomni-policy = { path = "../deepomni-policy" }
 deepomni-tools = { path = "../deepomni-tools" }
 deepomni-model-provider = { path = "../deepomni-model-provider" }
@@ -29,3 +31,6 @@ deepomni-plugin = { path = "../deepomni-plugin" }
 deepomni-hooks = { path = "../deepomni-hooks" }
 deepomni-prompt = { path = "../deepomni-prompt" }
 deepomni-state = { path = "../deepomni-state" }
+
+[dev-dependencies]
+deepomni-test-support = { path = "../deepomni-test-support" }

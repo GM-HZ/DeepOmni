@@ -9,9 +9,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use deepomni_protocol::{
-    EventFrame, ThreadId, ToolOutput, TurnId,
-};
+use deepomni_protocol::{EventFrame, ToolOutput};
 
 use async_trait::async_trait;
 use deepomni_model_provider::{
@@ -338,6 +336,7 @@ pub fn assert_json_snapshot(name: &str, value: &impl serde::Serialize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use deepomni_protocol::{ThreadId, TurnId};
 
     #[test]
     fn test_temp_workspace_create_and_cleanup() {

@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 use tracing::debug;
 
 use deepomni_model_provider::{
-    MessageRole, ModelDelta, ModelInfo, ModelMessage, ModelProvider,
+    MessageRole, ModelDelta, ModelInfo, ModelProvider,
     ModelProviderError, ModelRequest, ReasoningReplay,
 };
 
@@ -142,12 +142,14 @@ struct SseChunk {
     #[serde(default)]
     choices: Vec<SseChoice>,
     #[serde(default)]
+    #[allow(dead_code)]
     usage: Option<SseUsage>,
 }
 
 #[derive(Debug, Deserialize)]
 struct SseChoice {
     #[serde(default)]
+    #[allow(dead_code)]
     index: u32,
     #[serde(default)]
     delta: SseDelta,
@@ -568,6 +570,7 @@ fn role_to_str(role: &MessageRole) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use deepomni_model_provider::ModelMessage;
 
     #[test]
     fn test_requires_reasoning() {

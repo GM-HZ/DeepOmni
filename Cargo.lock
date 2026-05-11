@@ -347,7 +347,7 @@ dependencies = [
  "async-trait",
  "deepomni-context",
  "deepomni-core",
- "deepomni-events",
+ "deepomni-journal",
  "deepomni-model-provider",
  "deepomni-policy",
  "deepomni-protocol",
@@ -406,6 +406,7 @@ name = "deepomni-context"
 version = "0.1.0"
 dependencies = [
  "deepomni-core",
+ "deepomni-model-provider",
  "deepomni-protocol",
  "serde",
  "sha2",
@@ -419,6 +420,21 @@ dependencies = [
  "time",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "deepomni-engine"
+version = "0.1.0"
+dependencies = [
+ "deepomni-agent",
+ "deepomni-context",
+ "deepomni-journal",
+ "deepomni-model-provider",
+ "deepomni-protocol",
+ "deepomni-tools",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -444,6 +460,18 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "deepomni-journal"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "deepomni-protocol",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -539,9 +567,11 @@ dependencies = [
  "async-trait",
  "deepomni-agent",
  "deepomni-config",
+ "deepomni-context",
  "deepomni-core",
  "deepomni-events",
  "deepomni-hooks",
+ "deepomni-journal",
  "deepomni-model-provider",
  "deepomni-plugin",
  "deepomni-policy",
@@ -550,6 +580,7 @@ dependencies = [
  "deepomni-provider-deepseek",
  "deepomni-skills",
  "deepomni-state",
+ "deepomni-test-support",
  "deepomni-tool-builtin",
  "deepomni-tools",
  "serde",
@@ -601,11 +632,13 @@ name = "deepomni-state"
 version = "0.1.0"
 dependencies = [
  "deepomni-core",
+ "deepomni-journal",
  "deepomni-protocol",
  "dirs",
  "rusqlite",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
  "uuid",
 ]

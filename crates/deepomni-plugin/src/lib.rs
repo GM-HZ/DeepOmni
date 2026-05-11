@@ -63,6 +63,7 @@ pub struct PluginInterface {
 
 /// Load result for a plugin.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum PluginLoadOutcome {
     /// Plugin loaded successfully.
     Loaded(LoadedPlugin),

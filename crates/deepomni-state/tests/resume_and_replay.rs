@@ -4,6 +4,7 @@
 use deepomni_protocol::EventFrame;
 use deepomni_protocol::id::{ThreadId, TurnId};
 use deepomni_state::{StateStore, ThreadRecord, TurnRecord};
+use deepomni_journal::{JournalEntry, TurnJournal};
 
 fn test_store() -> StateStore {
     let path = std::env::temp_dir().join(format!("state-integration-{}.db", uuid::Uuid::new_v4()));
@@ -125,6 +126,93 @@ fn test_event_replay_since_seq() {
     assert_eq!(later.len(), 2);
     assert_eq!(later[0].0, 3);
     assert_eq!(later[1].0, 4);
+}
+
+#[test]
+fn test_journal_append_replay_and_pending_approval_projection() {
+    let store = test_store();
+    let thread_id = ThreadId::from_string("thread-journal-1");
+    let turn_id = TurnId::from_string("turn-journal-1");
+
+    store.upsert_thread(&ThreadRecord {
+        id: thread_id.to_string(),
+        preview: "".into(),
+        ephemeral: false,
+        model_provider: "deepseek".into(),
+        created_at: current_timestamp(),
+        updated_at: current_timestamp(),
+        status: "idle".into(),
+        path: None,
+        cwd: ".".into(),
+        cli_version: "0.1.0".into(),
+        source: "interactive".into(),
+        name: None,
+        sandbox_policy: None,
+        approval_mode: None,
+        archived: false,
+        archived_at: None,
+        parent_thread_id: None,
+    }).unwrap();
+
+    let first = store
+        .append(
+            &thread_id,
+            &turn_id,
+            JournalEntry::TurnStarted {
+                user_input: "hello".into(),
+            },
+        )
+        .unwrap();
+    let second = store
+        .append(
+            &thread_id,
+            &turn_id,
+            JournalEntry::ApprovalPending {
+                call_id: deepomni_protocol::ToolCallId::from_string("call-1"),
+                approval_id: "approval-1".into(),
+                tool_name: "write_file".into(),
+                arguments: serde_json::json!({"path": "README.md"}),
+                reason: "mutating tool".into(),
+                model: "deepseek-chat".into(),
+                workspace: "/workspace".into(),
+                config_json: "{\"model\":\"deepseek-chat\"}".into(),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(first.seq, 1);
+    assert_eq!(second.seq, 2);
+
+    let replayed = store.replay(&thread_id, 0).unwrap();
+    assert_eq!(replayed.len(), 2);
+    assert_eq!(replayed[0].seq, 1);
+    assert_eq!(replayed[1].seq, 2);
+
+    let pending = store
+        .get_pending_approval_by_turn(thread_id.as_str(), turn_id.as_str())
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.approval_id, "approval-1");
+    assert_eq!(pending.tool_name, "write_file");
+    assert_eq!(pending.arguments_json, "{\"path\":\"README.md\"}");
+
+    store
+        .append(
+            &thread_id,
+            &turn_id,
+            JournalEntry::ApprovalResolved {
+                approval_id: "approval-1".into(),
+                approved: true,
+            },
+        )
+        .unwrap();
+
+    assert!(
+        store
+            .get_pending_approval_by_turn(thread_id.as_str(), turn_id.as_str())
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]

@@ -15,7 +15,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 deepomni-core = { path = "../deepomni-core" }
 deepomni-protocol = { path = "../deepomni-protocol" }
-deepomni-events = { path = "../deepomni-events" }
+deepomni-journal = { path = "../deepomni-journal" }
 deepomni-model-provider = { path = "../deepomni-model-provider" }
 deepomni-tools = { path = "../deepomni-tools" }
 deepomni-policy = { path = "../deepomni-policy" }

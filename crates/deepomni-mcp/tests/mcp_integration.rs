@@ -2,9 +2,9 @@
 //! Tests the full initialize → tools/list → tool call bridge flow.
 
 use deepomni_mcp::{McpManager, McpServerStatus};
-use serde_json::Value;
 
 /// Mock MCP initialize response.
+#[allow(dead_code)]
 fn mock_initialize_response() -> String {
     serde_json::json!({
         "jsonrpc": "2.0",

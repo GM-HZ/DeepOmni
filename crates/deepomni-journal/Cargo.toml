@@ -1,5 +1,5 @@
 [package]
-name = "deepomni-context"
+name = "deepomni-journal"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,8 +7,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 serde = { workspace = true }
-sha2 = { workspace = true }
-deepomni-core = { path = "../deepomni-core" }
-deepomni-model-provider = { path = "../deepomni-model-provider" }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
 deepomni-protocol = { path = "../deepomni-protocol" }
+

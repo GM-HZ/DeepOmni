@@ -12,6 +12,8 @@ members = [
     "crates/deepomni-policy",
     "crates/deepomni-sandbox",
     "crates/deepomni-state",
+    "crates/deepomni-journal",
+    "crates/deepomni-engine",
     "crates/deepomni-events",
     "crates/deepomni-context",
     "crates/deepomni-skills",

@@ -246,8 +246,6 @@ impl std::error::Error for ModelProviderError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::pin::Pin;
-    use futures::Stream;
 
     /// Mock provider for testing.
     struct MockProvider {

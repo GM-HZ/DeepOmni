@@ -12,6 +12,8 @@ rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+tokio = { workspace = true }
 uuid = { workspace = true }
 deepomni-core = { path = "../deepomni-core" }
 deepomni-protocol = { path = "../deepomni-protocol" }
+deepomni-journal = { path = "../deepomni-journal" }
