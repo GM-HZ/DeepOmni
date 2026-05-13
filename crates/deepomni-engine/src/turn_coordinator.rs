@@ -3,10 +3,11 @@
 
 use std::sync::Arc;
 
+use deepomni_protocol::EventMsg;
 use deepomni_protocol::id::{ThreadId, TurnId};
 use deepomni_protocol::op::{Op, Submission, SubmissionId};
 
-use crate::OpHandler;
+use crate::{OpHandler, SessionEventSink};
 
 /// Services the TurnCoordinator needs from the runtime for turn execution.
 /// Implemented by the runtime as a thin adapter over the existing methods.
@@ -20,7 +21,7 @@ pub trait TurnServices: Send + Sync + 'static {
         text_input: String,
         model: Option<String>,
         submission_id: SubmissionId,
-    );
+    ) -> TurnOpResult;
 
     /// Handle an ApprovalDecision op.
     async fn handle_approval(
@@ -29,13 +30,18 @@ pub trait TurnServices: Send + Sync + 'static {
         approval_id: String,
         approved: bool,
         submission_id: SubmissionId,
-    );
+    ) -> TurnOpResult;
 
     /// Handle a Cancel op.
-    async fn handle_cancel(&self, thread_id: ThreadId, submission_id: SubmissionId);
+    async fn handle_cancel(&self, thread_id: ThreadId, submission_id: SubmissionId)
+    -> TurnOpResult;
 
     /// Handle a Compact op.
-    async fn handle_compact(&self, thread_id: ThreadId, submission_id: SubmissionId);
+    async fn handle_compact(
+        &self,
+        thread_id: ThreadId,
+        submission_id: SubmissionId,
+    ) -> TurnOpResult;
 
     /// Handle a SteerInput op.
     async fn handle_steer(
@@ -43,7 +49,7 @@ pub trait TurnServices: Send + Sync + 'static {
         thread_id: ThreadId,
         steer_text: String,
         submission_id: SubmissionId,
-    );
+    ) -> TurnOpResult;
 }
 
 /// Result of processing a turn op. Simple enough that engine doesn't
@@ -90,8 +96,9 @@ impl TurnCoordinator {
 
 #[async_trait::async_trait]
 impl OpHandler for TurnCoordinator {
-    async fn handle_op(&self, submission: Submission) {
-        match submission.op {
+    async fn handle_op(&self, submission: Submission, events: SessionEventSink) {
+        let submission_id = submission.id.clone();
+        let result = match submission.op {
             Op::UserInput {
                 thread_id,
                 input,
@@ -133,7 +140,16 @@ impl OpHandler for TurnCoordinator {
                     .handle_steer(thread_id, text, submission.id)
                     .await
             }
-        }
+        };
+        events.emit_msg(
+            submission_id,
+            EventMsg::OpCompleted {
+                thread_id: result.thread_id,
+                turn_id: result.turn_id,
+                status: result.status,
+                user_input: result.user_input,
+            },
+        );
     }
 }
 
@@ -154,8 +170,9 @@ mod tests {
             text: String,
             _model: Option<String>,
             _submission_id: SubmissionId,
-        ) {
+        ) -> TurnOpResult {
             let _ = self.tx.send(format!("user_input:{text}"));
+            TurnOpResult::ok(ThreadId::from_string("t"), None, "completed")
         }
         async fn handle_approval(
             &self,
@@ -163,22 +180,34 @@ mod tests {
             approval_id: String,
             approved: bool,
             _submission_id: SubmissionId,
-        ) {
+        ) -> TurnOpResult {
             let _ = self.tx.send(format!("approval:{approval_id}:{approved}"));
+            TurnOpResult::ok(ThreadId::from_string("t"), None, "completed")
         }
-        async fn handle_cancel(&self, _thread_id: ThreadId, _submission_id: SubmissionId) {
+        async fn handle_cancel(
+            &self,
+            _thread_id: ThreadId,
+            _submission_id: SubmissionId,
+        ) -> TurnOpResult {
             let _ = self.tx.send("cancel".into());
+            TurnOpResult::ok(ThreadId::from_string("t"), None, "interrupted")
         }
-        async fn handle_compact(&self, _thread_id: ThreadId, _submission_id: SubmissionId) {
+        async fn handle_compact(
+            &self,
+            _thread_id: ThreadId,
+            _submission_id: SubmissionId,
+        ) -> TurnOpResult {
             let _ = self.tx.send("compact".into());
+            TurnOpResult::ok(ThreadId::from_string("t"), None, "completed")
         }
         async fn handle_steer(
             &self,
             _thread_id: ThreadId,
             text: String,
             _submission_id: SubmissionId,
-        ) {
+        ) -> TurnOpResult {
             let _ = self.tx.send(format!("steer:{text}"));
+            TurnOpResult::ok(ThreadId::from_string("t"), None, "started")
         }
     }
 
@@ -190,71 +219,91 @@ mod tests {
 
         // Submit UserInput op.
         coordinator
-            .handle_op(Submission {
-                id: SubmissionId::new(),
-                op: Op::UserInput {
-                    thread_id: ThreadId::from_string("t"),
-                    input: vec![deepomni_protocol::op::UserInput::Text {
-                        text: "hello".into(),
-                    }],
-                    settings: Default::default(),
+            .handle_op(
+                Submission {
+                    id: SubmissionId::new(),
+                    op: Op::UserInput {
+                        thread_id: ThreadId::from_string("t"),
+                        input: vec![deepomni_protocol::op::UserInput::Text {
+                            text: "hello".into(),
+                        }],
+                        settings: Default::default(),
+                    },
+                    trace: None,
                 },
-                trace: None,
-            })
+                test_event_sink(),
+            )
             .await;
         assert_eq!(rx.try_recv().unwrap(), "user_input:hello");
 
         // Submit Cancel op.
         coordinator
-            .handle_op(Submission {
-                id: SubmissionId::new(),
-                op: Op::Cancel {
-                    thread_id: ThreadId::from_string("t"),
+            .handle_op(
+                Submission {
+                    id: SubmissionId::new(),
+                    op: Op::Cancel {
+                        thread_id: ThreadId::from_string("t"),
+                    },
+                    trace: None,
                 },
-                trace: None,
-            })
+                test_event_sink(),
+            )
             .await;
         assert_eq!(rx.try_recv().unwrap(), "cancel");
 
         // Submit Compact op.
         coordinator
-            .handle_op(Submission {
-                id: SubmissionId::new(),
-                op: Op::Compact {
-                    thread_id: ThreadId::from_string("t"),
+            .handle_op(
+                Submission {
+                    id: SubmissionId::new(),
+                    op: Op::Compact {
+                        thread_id: ThreadId::from_string("t"),
+                    },
+                    trace: None,
                 },
-                trace: None,
-            })
+                test_event_sink(),
+            )
             .await;
         assert_eq!(rx.try_recv().unwrap(), "compact");
 
         // Submit SteerInput op.
         coordinator
-            .handle_op(Submission {
-                id: SubmissionId::new(),
-                op: Op::SteerInput {
-                    thread_id: ThreadId::from_string("t"),
-                    input: vec![deepomni_protocol::op::UserInput::Text {
-                        text: "steer me".into(),
-                    }],
+            .handle_op(
+                Submission {
+                    id: SubmissionId::new(),
+                    op: Op::SteerInput {
+                        thread_id: ThreadId::from_string("t"),
+                        input: vec![deepomni_protocol::op::UserInput::Text {
+                            text: "steer me".into(),
+                        }],
+                    },
+                    trace: None,
                 },
-                trace: None,
-            })
+                test_event_sink(),
+            )
             .await;
         assert_eq!(rx.try_recv().unwrap(), "steer:steer me");
 
         // Submit ApprovalDecision op.
         coordinator
-            .handle_op(Submission {
-                id: SubmissionId::new(),
-                op: Op::ApprovalDecision {
-                    thread_id: ThreadId::from_string("t"),
-                    approval_id: "approval-1".into(),
-                    approved: true,
+            .handle_op(
+                Submission {
+                    id: SubmissionId::new(),
+                    op: Op::ApprovalDecision {
+                        thread_id: ThreadId::from_string("t"),
+                        approval_id: "approval-1".into(),
+                        approved: true,
+                    },
+                    trace: None,
                 },
-                trace: None,
-            })
+                test_event_sink(),
+            )
             .await;
         assert_eq!(rx.try_recv().unwrap(), "approval:approval-1:true");
+    }
+
+    fn test_event_sink() -> SessionEventSink {
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        SessionEventSink::new(event_tx)
     }
 }

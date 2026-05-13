@@ -12,7 +12,7 @@ use deepomni_protocol::{Event, EventMsg};
 /// Implemented by Runtime to wire actual turn execution.
 #[async_trait::async_trait]
 pub trait OpHandler: Send + Sync + 'static {
-    async fn handle_op(&self, submission: Submission);
+    async fn handle_op(&self, submission: Submission, events: SessionEventSink);
 }
 
 /// Handle for submitting ops to a session loop.
@@ -46,6 +46,26 @@ impl SessionLoopHandle {
         self.submission_tx
             .send(Submission { id, op, trace })
             .map_err(|_| SessionLoopError::Closed)
+    }
+}
+
+/// Sender side of the per-session event queue, passed to op handlers.
+#[derive(Clone)]
+pub struct SessionEventSink {
+    event_tx: mpsc::UnboundedSender<Event>,
+}
+
+impl SessionEventSink {
+    pub(crate) fn new(event_tx: mpsc::UnboundedSender<Event>) -> Self {
+        Self { event_tx }
+    }
+
+    pub fn emit(&self, event: Event) {
+        let _ = self.event_tx.send(event);
+    }
+
+    pub fn emit_msg(&self, id: SubmissionId, msg: EventMsg) {
+        self.emit(Event { id, msg });
     }
 }
 
@@ -101,17 +121,15 @@ impl SessionLoop {
             while let Some(submission) = loop_.submission_rx.recv().await {
                 let submission_id = submission.id.clone();
                 let thread_id = op_thread_id(&submission.op);
-                loop_.emit(Event {
-                    id: submission_id.clone(),
-                    msg: EventMsg::SubmissionStarted {
+                let sink = SessionEventSink::new(loop_.event_tx.clone());
+                sink.emit_msg(
+                    submission_id.clone(),
+                    EventMsg::SubmissionStarted {
                         thread_id: thread_id.clone(),
                     },
-                });
-                handler.handle_op(submission).await;
-                loop_.emit(Event {
-                    id: submission_id,
-                    msg: EventMsg::SubmissionCompleted { thread_id },
-                });
+                );
+                handler.handle_op(submission, sink.clone()).await;
+                sink.emit_msg(submission_id, EventMsg::SubmissionCompleted { thread_id });
             }
         });
 
@@ -141,10 +159,6 @@ impl SessionLoop {
         });
 
         (handle, observed_rx)
-    }
-
-    fn emit(&self, event: Event) {
-        let _ = self.event_tx.send(event);
     }
 }
 
@@ -246,8 +260,26 @@ mod tests {
 
     #[async_trait::async_trait]
     impl OpHandler for CollectingHandler {
-        async fn handle_op(&self, submission: Submission) {
+        async fn handle_op(&self, submission: Submission, _events: SessionEventSink) {
             let _ = self.tx.send(submission);
+        }
+    }
+
+    struct EventingHandler;
+
+    #[async_trait::async_trait]
+    impl OpHandler for EventingHandler {
+        async fn handle_op(&self, submission: Submission, events: SessionEventSink) {
+            let thread_id = op_thread_id(&submission.op);
+            events.emit_msg(
+                submission.id,
+                EventMsg::OpCompleted {
+                    thread_id,
+                    turn_id: None,
+                    status: "handled".into(),
+                    user_input: String::new(),
+                },
+            );
         }
     }
 
@@ -307,6 +339,32 @@ mod tests {
         assert!(matches!(
             completed.msg,
             EventMsg::SubmissionCompleted { ref thread_id } if thread_id.as_str() == "loop-thread"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_session_loop_allows_handler_to_emit_correlated_events() {
+        let (handle, mut events) = SessionLoop::spawn_with_event_queue(
+            ThreadId::from_string("loop-thread"),
+            Arc::new(EventingHandler),
+        );
+
+        let submission_id = handle
+            .submit(Op::Cancel {
+                thread_id: ThreadId::from_string("loop-thread"),
+            })
+            .unwrap();
+
+        let started = events.recv().await.unwrap();
+        let op_completed = events.recv().await.unwrap();
+        let completed = events.recv().await.unwrap();
+
+        assert_eq!(started.id, submission_id);
+        assert_eq!(op_completed.id, submission_id);
+        assert_eq!(completed.id, submission_id);
+        assert!(matches!(
+            op_completed.msg,
+            EventMsg::OpCompleted { ref status, .. } if status == "handled"
         ));
     }
 }

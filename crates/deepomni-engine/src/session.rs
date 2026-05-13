@@ -126,7 +126,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl OpHandler for TestHandler {
-        async fn handle_op(&self, submission: deepomni_protocol::op::Submission) {
+        async fn handle_op(
+            &self,
+            submission: deepomni_protocol::op::Submission,
+            _events: crate::SessionEventSink,
+        ) {
             let _ = self.tx.send(match &submission.op {
                 Op::Cancel { .. } => "cancel".into(),
                 Op::Compact { .. } => "compact".into(),

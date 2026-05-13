@@ -18,8 +18,8 @@ use deepomni_agent::{TurnConfig, TurnRequestKind, TurnResult, TurnRunner};
 use deepomni_config::{ConfigStore, ResolvedConfig};
 use deepomni_context::ContextManager;
 use deepomni_engine::{
-    AgentControl, ApprovalCoordinator, CompactionTracker, SessionLoop, SessionManager,
-    TurnCoordinator, TurnOpResult, TurnServices, TurnState, TurnStateMachine,
+    AgentControl, ApprovalCoordinator, CompactionTracker, SessionEventReceiver, SessionLoop,
+    SessionManager, TurnCoordinator, TurnOpResult, TurnServices, TurnState, TurnStateMachine,
 };
 use deepomni_events::EventBus;
 use deepomni_journal::{JournalEntry, TurnJournal};
@@ -1044,6 +1044,21 @@ impl Runtime {
             .submit_to(&thread_id, op)
             .await
             .map_err(|_| RuntimeError::NotReady("session loop closed".into()))
+    }
+
+    /// Take the single-consumer event queue for a runtime session.
+    ///
+    /// This is the host-facing half of the Submission/Event queue pair:
+    /// callers submit `Op`s through `submit()` and consume correlated `Event`s
+    /// from this receiver.
+    pub async fn take_session_event_receiver(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Option<SessionEventReceiver> {
+        self.inner
+            .session_manager
+            .take_event_receiver(thread_id)
+            .await
     }
 
     /// Best-effort Op submission through the thread's SessionLoop.
@@ -2233,9 +2248,7 @@ mod tests {
             .unwrap();
 
         let mut events = runtime
-            .inner
-            .session_manager
-            .take_event_receiver(&thread.id)
+            .take_session_event_receiver(&thread.id)
             .await
             .expect("Runtime-created sessions should register an event queue");
 
@@ -2252,12 +2265,19 @@ mod tests {
             .unwrap();
 
         let started = events.recv().await.unwrap();
+        let op_completed = events.recv().await.unwrap();
         let completed = events.recv().await.unwrap();
         assert_eq!(started.id, sub_id);
+        assert_eq!(op_completed.id, sub_id);
         assert_eq!(completed.id, sub_id);
         assert!(matches!(
             started.msg,
             EventMsg::SubmissionStarted { ref thread_id } if thread_id == &thread.id
+        ));
+        assert!(matches!(
+            op_completed.msg,
+            EventMsg::OpCompleted { ref thread_id, ref status, .. }
+                if thread_id == &thread.id && status == "interrupted"
         ));
         assert!(matches!(
             completed.msg,

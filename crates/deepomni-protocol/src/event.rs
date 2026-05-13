@@ -25,6 +25,12 @@ pub enum EventMsg {
     SubmissionCompleted {
         thread_id: ThreadId,
     },
+    OpCompleted {
+        thread_id: ThreadId,
+        turn_id: Option<TurnId>,
+        status: String,
+        user_input: String,
+    },
     SubmissionFailed {
         thread_id: ThreadId,
         error: String,

@@ -18,6 +18,8 @@ pub use compaction::CompactionTracker;
 pub use deepomni_prompt::{CompileConfig, CompiledRequest, RequestCompiler, TurnRequestKind};
 pub use mailbox::{Mailbox, MailboxReceiver};
 pub use session::SessionManager;
-pub use session_loop::{OpHandler, SessionEventReceiver, SessionLoop, SessionLoopHandle};
+pub use session_loop::{
+    OpHandler, SessionEventReceiver, SessionEventSink, SessionLoop, SessionLoopHandle,
+};
 pub use turn_coordinator::{TurnCoordinator, TurnOpResult, TurnServices};
 pub use turn_fsm::{TurnFsmError, TurnState, TurnStateMachine};
