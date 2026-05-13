@@ -20,7 +20,7 @@ deepomni-model-provider = { path = "../deepomni-model-provider" }
 deepomni-tools = { path = "../deepomni-tools" }
 deepomni-policy = { path = "../deepomni-policy" }
 deepomni-context = { path = "../deepomni-context" }
-deepomni-engine = { path = "../deepomni-engine" }
+deepomni-prompt = { path = "../deepomni-prompt" }
 deepomni-trace = { path = "../deepomni-trace" }
 
 [dev-dependencies]

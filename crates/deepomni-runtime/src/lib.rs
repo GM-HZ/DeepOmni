@@ -7,21 +7,22 @@
 //! PRD §7.3, §10.1
 
 mod projection;
+mod turn_adapter;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::{Mutex, RwLock, oneshot};
 
-use deepomni_agent::{TurnConfig, TurnResult, TurnRunner};
+use deepomni_agent::{TurnConfig, TurnRequestKind, TurnResult, TurnRunner};
 use deepomni_config::{ConfigStore, ResolvedConfig};
 use deepomni_context::ContextManager;
 use deepomni_engine::{
-    AgentControl, ApprovalCoordinator, CompactionTracker, SessionLoop, SessionLoopHandle,
-    SessionManager, TurnCoordinator, TurnOpResult, TurnServices, TurnState, TurnStateMachine,
+    AgentControl, ApprovalCoordinator, CompactionTracker, SessionLoop, SessionManager,
+    TurnCoordinator, TurnOpResult, TurnServices, TurnState, TurnStateMachine,
 };
 use deepomni_events::EventBus;
-use deepomni_journal::{JournalEntry, TurnJournal, journal_to_event_frame};
+use deepomni_journal::{JournalEntry, TurnJournal};
 use deepomni_model_provider::{ModelProvider, ProviderRegistry};
 use deepomni_policy::{AgentMode, PermissionProfile, PolicyEngine};
 use deepomni_protocol::id::{ThreadId, ToolCallId, TurnId};
@@ -33,6 +34,7 @@ use deepomni_protocol::{
 use deepomni_state::StateStore;
 use deepomni_tools::{ApprovalStore, ToolRegistry};
 use deepomni_trace::{NoopTraceWriter, TraceWriter};
+use turn_adapter::RuntimeTurnAdapter;
 
 /// The main runtime facade.
 ///
@@ -119,8 +121,6 @@ struct ActiveThread {
     #[allow(dead_code)]
     pub context_manager: ContextManager,
     pub approval_store: Arc<ApprovalStore>,
-    /// Optional background session loop for async Op submission.
-    pub session_loop: Option<Arc<deepomni_engine::SessionLoopHandle>>,
     /// Plan 3: Compaction tracker with circuit breaker (engine component).
     pub compaction_tracker: CompactionTracker,
     /// Plan 4: Mailbox sender for receiving child agent results.
@@ -314,229 +314,6 @@ impl RuntimeBuilder {
 impl Default for RuntimeBuilder {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-// ── TurnServices adapter (Phase C) ──
-
-/// Thin adapter implementing TurnServices so the engine's TurnCoordinator
-/// can dispatch ops to Runtime methods.
-struct RuntimeTurnAdapter {
-    inner: Arc<RuntimeInner>,
-}
-
-impl RuntimeTurnAdapter {
-    fn runtime(&self) -> Runtime {
-        Runtime {
-            inner: self.inner.clone(),
-        }
-    }
-
-    fn turn_status_to_op_status(status: &TurnStatus) -> String {
-        match status {
-            TurnStatus::Started => "started".into(),
-            TurnStatus::Streaming => "streaming".into(),
-            TurnStatus::WaitingForApproval => "waiting_for_approval".into(),
-            TurnStatus::ExecutingTool => "executing_tool".into(),
-            TurnStatus::Completed => "completed".into(),
-            TurnStatus::Failed => "failed".into(),
-            TurnStatus::Interrupted => "interrupted".into(),
-        }
-    }
-
-    fn turn_result_to_op_result(
-        &self,
-        thread_id: &ThreadId,
-        result: Result<Turn, RuntimeError>,
-    ) -> TurnOpResult {
-        match result {
-            Ok(turn) => {
-                let status_str = Self::turn_status_to_op_status(&turn.status);
-                TurnOpResult {
-                    thread_id: thread_id.clone(),
-                    turn_id: Some(turn.id),
-                    status: status_str,
-                    user_input: turn.user_input,
-                }
-            }
-            Err(e) => TurnOpResult::err(thread_id.clone(), format!("error: {e}")),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl TurnServices for RuntimeTurnAdapter {
-    async fn handle_user_input(
-        &self,
-        thread_id: ThreadId,
-        text: String,
-        model: Option<String>,
-        submission_id: SubmissionId,
-    ) {
-        let rt = self.runtime();
-        let result = rt
-            .submit_turn_direct(
-                thread_id.clone(),
-                CreateTurnRequest {
-                    input: text,
-                    model,
-                    parent_turn_id: None,
-                    subagent_id: None,
-                    max_token_budget: None,
-                },
-            )
-            .await;
-        let op_result = self.turn_result_to_op_result(&thread_id, result);
-        self.deliver_reply(submission_id, op_result).await;
-    }
-
-    async fn handle_approval(
-        &self,
-        thread_id: ThreadId,
-        approval_id: String,
-        approved: bool,
-        submission_id: SubmissionId,
-    ) {
-        let rt = self.runtime();
-        let pending = rt
-            .inner
-            .approval_coordinator
-            .resolve_by_approval_id(&approval_id)
-            .await;
-        let result = match pending {
-            Some(p) => {
-                if approved {
-                    rt.approve_tool_direct(thread_id.clone(), p.turn_id).await
-                } else {
-                    rt.reject_tool_direct(thread_id.clone(), p.turn_id).await
-                }
-            }
-            None => Err(RuntimeError::NotReady(format!(
-                "no pending approval for {approval_id}"
-            ))),
-        };
-        let op_result = self.turn_result_to_op_result(&thread_id, result);
-        self.deliver_reply(submission_id, op_result).await;
-    }
-
-    async fn handle_cancel(&self, thread_id: ThreadId, submission_id: SubmissionId) {
-        let rt = self.runtime();
-        let active_threads = rt.inner.active_threads.read().await;
-        if let Some(active) = active_threads.get(&thread_id)
-            && let Some(ref turn_id) = active.active_turn_id
-        {
-            let _ = rt.append_turn_journal(
-                &thread_id,
-                turn_id,
-                JournalEntry::TurnInterrupted {
-                    reason: "cancelled by user".into(),
-                },
-            );
-        }
-        self.deliver_reply(
-            submission_id,
-            TurnOpResult::ok(thread_id, None, "interrupted"),
-        )
-        .await;
-    }
-
-    async fn handle_compact(&self, thread_id: ThreadId, submission_id: SubmissionId) {
-        let rt = self.runtime();
-        let mut threads = rt.inner.active_threads.write().await;
-        match threads.get_mut(&thread_id) {
-            Some(active) => {
-                let mut ctx = active.context_manager.clone();
-                let before = ctx.len();
-                let removed = ctx.drop_last_n_user_turns(5);
-                if removed == 0 && before > 20 {
-                    ctx.replace_history(
-                        ctx.for_prompt().into_iter().rev().take(20).rev().collect(),
-                    );
-                }
-                let after = ctx.len();
-                active.context_manager = ctx;
-                let _ = rt.append_turn_journal(
-                    &thread_id,
-                    &TurnId::new(),
-                    JournalEntry::ContextCompactionStarted,
-                );
-                let _ = rt.append_turn_journal(
-                    &thread_id,
-                    &TurnId::new(),
-                    JournalEntry::ContextCompactionCompleted,
-                );
-                rt.inner.services.trace_writer.record_compaction(
-                    &thread_id,
-                    before as u64,
-                    after as u64,
-                );
-                active
-                    .compaction_tracker
-                    .record_success(before as u64, after as u64);
-                self.deliver_reply(
-                    submission_id,
-                    TurnOpResult::ok(thread_id, None, "completed"),
-                )
-                .await;
-            }
-            None => {
-                if let Some(active) = threads.get_mut(&thread_id) {
-                    active.compaction_tracker.record_failure();
-                }
-                self.deliver_reply(
-                    submission_id,
-                    TurnOpResult::err(thread_id, "error: thread not found".into()),
-                )
-                .await;
-            }
-        }
-    }
-
-    async fn handle_steer(
-        &self,
-        thread_id: ThreadId,
-        steer_text: String,
-        submission_id: SubmissionId,
-    ) {
-        let rt = self.runtime();
-        let active_threads = rt.inner.active_threads.read().await;
-        if let Some(active) = active_threads.get(&thread_id)
-            && let Some(ref turn_id) = active.active_turn_id
-        {
-            let _ = rt.append_turn_journal(
-                &thread_id,
-                turn_id,
-                JournalEntry::AssistantDelta {
-                    message_id: deepomni_protocol::id::MessageId::from_string("steer"),
-                    delta: format!("<steer>{steer_text}</steer>"),
-                },
-            );
-            self.deliver_reply(
-                submission_id,
-                TurnOpResult::ok(thread_id, Some(turn_id.clone()), "started"),
-            )
-            .await;
-        } else {
-            self.deliver_reply(
-                submission_id,
-                TurnOpResult::err(thread_id, "error: no active turn for steer input".into()),
-            )
-            .await;
-        }
-    }
-}
-
-impl RuntimeTurnAdapter {
-    async fn deliver_reply(&self, submission_id: SubmissionId, result: TurnOpResult) {
-        if let Some(reply_tx) = self
-            .inner
-            .submission_replies
-            .write()
-            .await
-            .remove(&submission_id)
-        {
-            let _ = reply_tx.send(result);
-        }
     }
 }
 
@@ -740,7 +517,6 @@ impl Runtime {
                 active_turn_id: None,
                 context_manager: ContextManager::new(),
                 approval_store: Arc::new(ApprovalStore::new()),
-                session_loop: Some(Arc::new(loop_handle)),
                 compaction_tracker: CompactionTracker::new(),
                 mailbox_tx: None,
                 turn_fsm: None,
@@ -777,12 +553,7 @@ impl Runtime {
         request: CreateTurnRequest,
     ) -> Result<Turn, RuntimeError> {
         // Phase 1: Try the SessionLoop path first.
-        let loop_handle = {
-            let threads = self.inner.active_threads.read().await;
-            threads
-                .get(&thread_id)
-                .and_then(|active| active.session_loop.clone())
-        };
+        let loop_handle = self.inner.session_manager.get_handle(&thread_id).await;
         if let Some(handle) = loop_handle {
             return self.submit_turn_via_loop(handle, thread_id, request).await;
         }
@@ -794,7 +565,7 @@ impl Runtime {
     /// Submit a turn through the SessionLoop and wait for the result.
     async fn submit_turn_via_loop(
         &self,
-        handle: Arc<SessionLoopHandle>,
+        handle: Arc<deepomni_engine::SessionLoopHandle>,
         thread_id: ThreadId,
         request: CreateTurnRequest,
     ) -> Result<Turn, RuntimeError> {
@@ -1012,6 +783,7 @@ impl Runtime {
             .inner
             .turn_runner
             .run_turn(deepomni_agent::RunTurnRequest {
+                kind: TurnRequestKind::NewTurn,
                 thread_id: thread_id.clone(),
                 turn_id: turn_id.clone(),
                 user_input: request.input.clone(),
@@ -1178,10 +950,8 @@ impl Runtime {
                     })
                 };
                 if needs_compact
-                    && let Some(ref handle) = {
-                        let threads = self.inner.active_threads.read().await;
-                        threads.get(&thread_id).and_then(|a| a.session_loop.clone())
-                    }
+                    && let Some(ref handle) =
+                        self.inner.session_manager.get_handle(&thread_id).await
                 {
                     let _ = handle.submit(Op::Compact {
                         thread_id: thread_id.clone(),
@@ -1268,13 +1038,10 @@ impl Runtime {
     /// Plan 1 Task 3: async submission API.
     pub async fn submit(&self, op: Op) -> Result<SubmissionId, RuntimeError> {
         let thread_id = op_thread_id(&op);
-        let active = self.get_active_thread(&thread_id).await?;
-        let handle = active
-            .session_loop
-            .as_ref()
-            .ok_or(RuntimeError::NotReady("no session loop for thread".into()))?;
-        handle
-            .submit(op)
+        self.inner
+            .session_manager
+            .submit_to(&thread_id, op)
+            .await
             .map_err(|_| RuntimeError::NotReady("session loop closed".into()))
     }
 
@@ -1285,9 +1052,11 @@ impl Runtime {
         op: deepomni_protocol::op::Op,
     ) -> Option<deepomni_protocol::op::SubmissionId> {
         let thread_id = op_thread_id(&op);
-        let active = self.get_active_thread(&thread_id).await.ok()?;
-        let handle = active.session_loop.as_ref()?;
-        handle.submit(op).ok()
+        self.inner
+            .session_manager
+            .submit_to(&thread_id, op)
+            .await
+            .ok()
     }
 
     /// List threads from durable state.
@@ -1387,12 +1156,7 @@ impl Runtime {
         turn_id: TurnId,
     ) -> Result<Turn, RuntimeError> {
         // Phase 1/2: Try the SessionLoop path first.
-        let loop_handle = {
-            let threads = self.inner.active_threads.read().await;
-            threads
-                .get(&thread_id)
-                .and_then(|active| active.session_loop.clone())
-        };
+        let loop_handle = self.inner.session_manager.get_handle(&thread_id).await;
         if let Some(handle) = loop_handle {
             // Resolve pending approval FIRST to get the real approval_id
             // (not the turn_id). ToolOrchestrator generates a random
@@ -1566,12 +1330,7 @@ impl Runtime {
         turn_id: TurnId,
     ) -> Result<Turn, RuntimeError> {
         // Phase 1/2: Try the SessionLoop path first.
-        let loop_handle = {
-            let threads = self.inner.active_threads.read().await;
-            threads
-                .get(&thread_id)
-                .and_then(|active| active.session_loop.clone())
-        };
+        let loop_handle = self.inner.session_manager.get_handle(&thread_id).await;
         if let Some(handle) = loop_handle {
             // Resolve pending to get real approval_id (not turn_id).
             let pending = self.resolve_pending_approval(&thread_id, &turn_id).await?;
@@ -1679,14 +1438,11 @@ impl Runtime {
         since_seq: i64,
     ) -> Result<Vec<(i64, deepomni_protocol::EventFrame)>, RuntimeError> {
         let tid = ThreadId::from_string(thread_id);
-        let journal_events: Vec<_> = self
+        let journal_events = self
             .inner
-            .state
-            .replay(&tid, since_seq)
-            .map_err(|e| RuntimeError::State(format!("{e}")))?
-            .into_iter()
-            .filter_map(|record| journal_to_event_frame(&record).map(|event| (record.seq, event)))
-            .collect();
+            .projection_service
+            .replay_events(&tid, since_seq)
+            .map_err(RuntimeError::State)?;
         if !journal_events.is_empty() {
             return Ok(journal_events);
         }
@@ -1715,52 +1471,6 @@ impl Runtime {
     }
 
     // ── Internal helpers ──
-
-    async fn get_active_thread(&self, thread_id: &ThreadId) -> Result<ActiveThread, RuntimeError> {
-        self.inner
-            .active_threads
-            .read()
-            .await
-            .get(thread_id)
-            .cloned()
-            .or_else(|| {
-                // Try to load from state.
-                let record = self
-                    .inner
-                    .state
-                    .get_thread(thread_id.as_str())
-                    .ok()
-                    .flatten()?;
-                Some(ActiveThread {
-                    thread: Thread {
-                        id: ThreadId::from_string(&record.id),
-                        preview: record.preview,
-                        ephemeral: record.ephemeral,
-                        model_provider: record.model_provider,
-                        created_at: record.created_at,
-                        updated_at: record.updated_at,
-                        status: serde_status(&record.status),
-                        path: record.path,
-                        cwd: std::path::PathBuf::from(&record.cwd),
-                        cli_version: record.cli_version,
-                        source: serde_source(&record.source),
-                        name: record.name,
-                        sandbox_policy: record.sandbox_policy,
-                        approval_mode: record.approval_mode,
-                        parent_thread_id: record.parent_thread_id.map(ThreadId::from_string),
-                    },
-                    status: serde_status(&record.status),
-                    active_turn_id: None,
-                    context_manager: ContextManager::new(),
-                    approval_store: Arc::new(ApprovalStore::new()),
-                    session_loop: None,
-                    compaction_tracker: CompactionTracker::new(),
-                    mailbox_tx: None,
-                    turn_fsm: None,
-                })
-            })
-            .ok_or_else(|| RuntimeError::ThreadNotFound(thread_id.clone()))
-    }
 
     async fn approval_store_for_thread(&self, thread_id: &ThreadId) -> Option<Arc<ApprovalStore>> {
         self.inner
@@ -2461,16 +2171,13 @@ mod tests {
             .await
             .unwrap();
 
-        // Verify the thread has a session loop.
-        let threads = runtime.inner.active_threads.read().await;
-        let active = threads.get(&thread.id).unwrap();
+        // Verify SessionManager owns the session loop.
         assert!(
-            active.session_loop.is_some(),
-            "session loop must be registered"
+            runtime.inner.session_manager.has(&thread.id).await,
+            "session loop must be registered in SessionManager"
         );
 
         // Submit an op through the session loop.
-        let handle = active.session_loop.as_ref().unwrap();
         let op = Op::UserInput {
             thread_id: thread.id.clone(),
             input: vec![UserInput::Text {
@@ -2478,14 +2185,25 @@ mod tests {
             }],
             settings: Default::default(),
         };
-        let sub_id = handle.submit(op).unwrap();
+        let sub_id = runtime
+            .inner
+            .session_manager
+            .submit_to(&thread.id, op)
+            .await
+            .unwrap();
         assert!(!sub_id.as_str().is_empty(), "submission must return an id");
 
         // Sequential submission preserves order.
-        let sub2 = handle
-            .submit(Op::Cancel {
-                thread_id: thread.id.clone(),
-            })
+        let sub2 = runtime
+            .inner
+            .session_manager
+            .submit_to(
+                &thread.id,
+                Op::Cancel {
+                    thread_id: thread.id.clone(),
+                },
+            )
+            .await
             .unwrap();
         assert_ne!(sub_id, sub2);
     }
@@ -2526,20 +2244,28 @@ mod tests {
             .await
             .unwrap();
 
-        let threads = runtime.inner.active_threads.read().await;
-        let h1 = threads.get(&t1.id).unwrap().session_loop.as_ref().unwrap();
-        let h2 = threads.get(&t2.id).unwrap().session_loop.as_ref().unwrap();
-
         // Both threads accept ops concurrently without sharing state.
-        let sub1 = h1
-            .submit(Op::Cancel {
-                thread_id: t1.id.clone(),
-            })
+        let sub1 = runtime
+            .inner
+            .session_manager
+            .submit_to(
+                &t1.id,
+                Op::Cancel {
+                    thread_id: t1.id.clone(),
+                },
+            )
+            .await
             .unwrap();
-        let sub2 = h2
-            .submit(Op::Cancel {
-                thread_id: t2.id.clone(),
-            })
+        let sub2 = runtime
+            .inner
+            .session_manager
+            .submit_to(
+                &t2.id,
+                Op::Cancel {
+                    thread_id: t2.id.clone(),
+                },
+            )
+            .await
             .unwrap();
         assert!(!sub1.as_str().is_empty());
         assert!(!sub2.as_str().is_empty());
@@ -3339,11 +3065,9 @@ mod tests {
             })
             .await
             .unwrap();
-        let threads = runtime.inner.active_threads.read().await;
-        let active = threads.get(&thread.id).unwrap();
         assert!(
-            active.session_loop.is_some(),
-            "SessionLoopHandle must be wired"
+            runtime.inner.session_manager.has(&thread.id).await,
+            "SessionLoopHandle must be owned by SessionManager"
         );
 
         // 2. TurnStateMachine (Plan 1)
@@ -3365,7 +3089,15 @@ mod tests {
         assert!(!has_pending, "no pending approvals initially");
 
         // 4. CompactionTracker (Plan 3)
-        let can_compact = active.compaction_tracker.can_auto_compact(3);
+        let can_compact = runtime
+            .inner
+            .active_threads
+            .read()
+            .await
+            .get(&thread.id)
+            .unwrap()
+            .compaction_tracker
+            .can_auto_compact(3);
         assert!(can_compact, "compaction tracker starts fresh");
 
         // 5. AgentControl (Plan 4)

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use deepomni_agent::{RunTurnRequest, TurnConfig, TurnResult, TurnRunner};
+use deepomni_agent::{RunTurnRequest, TurnConfig, TurnRequestKind, TurnResult, TurnRunner};
 use deepomni_journal::InMemoryJournal;
 use deepomni_policy::{AgentMode, PermissionProfile, PolicyEngine};
 use deepomni_protocol::id::{ThreadId, TurnId};
@@ -56,6 +56,7 @@ fn config(mode: AgentMode) -> TurnConfig {
 
 fn request(provider: Arc<MockModelProvider>, mode: AgentMode, user_input: &str) -> RunTurnRequest {
     RunTurnRequest {
+        kind: TurnRequestKind::NewTurn,
         thread_id: ThreadId::new(),
         turn_id: TurnId::new(),
         user_input: user_input.into(),
@@ -243,7 +244,7 @@ async fn test_tool_router_integration() {
 /// Plan 2 acceptance: Unknown tool is rejected by router → Forbidden in agent.
 #[tokio::test]
 async fn test_plan2_unknown_tool_rejected_by_router_in_agent() {
-    use deepomni_agent::{RunTurnRequest, TurnConfig, TurnResult, TurnRunner};
+    use deepomni_agent::{RunTurnRequest, TurnConfig, TurnRequestKind, TurnResult, TurnRunner};
     use deepomni_journal::InMemoryJournal;
     use deepomni_policy::{AgentMode, PermissionProfile, PolicyEngine};
     use deepomni_protocol::id::{ThreadId, TurnId};
@@ -267,6 +268,7 @@ async fn test_plan2_unknown_tool_rejected_by_router_in_agent() {
 
     let result = runner
         .run_turn(RunTurnRequest {
+            kind: TurnRequestKind::NewTurn,
             thread_id: ThreadId::from_string("plan2-unknown"),
             turn_id: TurnId::from_string("plan2-t1"),
             user_input: "use nonexistent tool".into(),
@@ -365,7 +367,7 @@ async fn test_plan2_pre_hook_blocks_tool_execution() {
 /// Plan 2 Task 3: Unknown tool produces router-level forbidden, not panic/skip.
 #[tokio::test]
 async fn unknown_tool_is_rejected_by_router() {
-    use deepomni_agent::{RunTurnRequest, TurnConfig, TurnResult, TurnRunner};
+    use deepomni_agent::{RunTurnRequest, TurnConfig, TurnRequestKind, TurnResult, TurnRunner};
     use deepomni_journal::InMemoryJournal;
     use deepomni_policy::{AgentMode, PermissionProfile, PolicyEngine};
     use deepomni_protocol::id::{ThreadId, TurnId};
@@ -388,6 +390,7 @@ async fn unknown_tool_is_rejected_by_router() {
 
     let result = runner
         .run_turn(RunTurnRequest {
+            kind: TurnRequestKind::NewTurn,
             thread_id: ThreadId::from_string("router-unknown"),
             turn_id: TurnId::from_string("router-t1"),
             user_input: "use unknown tool".into(),

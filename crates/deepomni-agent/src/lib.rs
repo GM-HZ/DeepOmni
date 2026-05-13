@@ -40,6 +40,7 @@ use deepomni_model_provider::{
     ReasoningReplay,
 };
 use deepomni_policy::{AgentMode, PermissionProfile, PolicyEngine};
+pub use deepomni_prompt::TurnRequestKind;
 use deepomni_protocol::EventFrame;
 use deepomni_protocol::id::{MessageId, SubagentId, ThreadId, ToolCallId, TurnId};
 use deepomni_tools::{
@@ -173,6 +174,7 @@ impl TurnContext {
 /// Request to run a new turn. Bundles all parameters that were previously
 /// spread across `run_turn`'s long argument list.
 pub struct RunTurnRequest {
+    pub kind: TurnRequestKind,
     pub thread_id: ThreadId,
     pub turn_id: TurnId,
     pub user_input: String,
@@ -201,8 +203,7 @@ pub struct ResumeTurnRequest {
     pub item_sink: Option<Arc<dyn Fn(deepomni_protocol::TurnItem) + Send + Sync>>,
 }
 
-// Phase E: RequestCompiler unified into deepomni-engine crate.
-// Agent now uses deepomni_engine::RequestCompiler directly.
+// Phase E: RequestCompiler lives below engine so the agent remains a pure worker.
 
 /// The core turn runner.
 ///
@@ -250,6 +251,7 @@ impl TurnRunner {
     /// handle tool calls, and return the final result.
     pub async fn run_turn(&self, request: RunTurnRequest) -> Result<TurnResult, TurnError> {
         let RunTurnRequest {
+            kind: request_kind,
             thread_id,
             turn_id,
             user_input,
@@ -308,8 +310,8 @@ impl TurnRunner {
             .await;
         }
 
-        // 4. Build initial model request using engine's unified RequestCompiler (Phase E).
-        let compile_config = deepomni_engine::CompileConfig {
+        // 4. Build initial model request using a lower-level RequestCompiler.
+        let compile_config = deepomni_prompt::CompileConfig {
             system_prompt: config.system_prompt.as_deref(),
             fragments: &assembled.messages,
             tools: tool_specs.clone(),
@@ -317,18 +319,12 @@ impl TurnRunner {
             model: ctx.model(),
             reasoning_to_replay: reasoning_to_replay.clone(),
         };
-        let compiled = if conversation_history.is_empty() {
-            deepomni_engine::RequestCompiler::compile_new_turn(
-                &compile_config,
-                &conversation_history,
-                &user_input,
-            )
-        } else {
-            deepomni_engine::RequestCompiler::compile_tool_continuation(
-                &compile_config,
-                &conversation_history,
-            )
-        };
+        let compiled = deepomni_prompt::RequestCompiler::compile(
+            request_kind,
+            &compile_config,
+            &conversation_history,
+            &user_input,
+        );
         let request = compiled.request;
 
         // 5. Stream from provider in a continuation loop.
@@ -875,6 +871,7 @@ impl TurnRunner {
         });
 
         self.run_turn(RunTurnRequest {
+            kind: TurnRequestKind::ToolContinuation,
             thread_id,
             turn_id,
             user_input: String::new(),
@@ -976,6 +973,7 @@ impl TurnRunner {
 
         let result = self
             .run_turn(RunTurnRequest {
+                kind: TurnRequestKind::NewTurn,
                 thread_id: child_thread_id,
                 turn_id: child_turn_id.clone(),
                 user_input: task,
@@ -1454,7 +1452,7 @@ mod tests {
 
     #[test]
     fn request_compiler_new_turn_appends_user_input() {
-        use deepomni_engine::{CompileConfig, RequestCompiler};
+        use deepomni_prompt::{CompileConfig, RequestCompiler};
         let config = CompileConfig {
             system_prompt: Some("system"),
             fragments: &[],
@@ -1475,7 +1473,7 @@ mod tests {
 
     #[test]
     fn request_compiler_tool_continuation_does_not_append_fake_user() {
-        use deepomni_engine::{CompileConfig, RequestCompiler};
+        use deepomni_prompt::{CompileConfig, RequestCompiler};
         let config = CompileConfig {
             system_prompt: Some("system"),
             fragments: &[],

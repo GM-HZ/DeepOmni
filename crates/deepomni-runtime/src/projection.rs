@@ -7,6 +7,7 @@ use tokio::sync::RwLock;
 
 use deepomni_events::EventBus;
 use deepomni_journal::{TurnJournal, journal_to_event_frame};
+use deepomni_protocol::EventFrame;
 use deepomni_protocol::id::ThreadId;
 
 /// Bridges durable journal storage → live EventBus broadcast.
@@ -56,5 +57,24 @@ impl ProjectionService {
                 }
             }
         });
+    }
+
+    /// Replay public EventFrame projections from the journal source of truth.
+    pub fn replay_events(
+        &self,
+        thread_id: &ThreadId,
+        since_seq: i64,
+    ) -> Result<Vec<(i64, EventFrame)>, String> {
+        self.state
+            .replay(thread_id, since_seq)
+            .map_err(|e| format!("{e}"))
+            .map(|records| {
+                records
+                    .into_iter()
+                    .filter_map(|record| {
+                        journal_to_event_frame(&record).map(|event| (record.seq, event))
+                    })
+                    .collect()
+            })
     }
 }

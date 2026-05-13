@@ -20,9 +20,35 @@ pub struct CompileConfig<'a> {
     pub reasoning_to_replay: Option<Vec<ReasoningReplay>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnRequestKind {
+    NewTurn,
+    ToolContinuation,
+    ApprovalResume,
+}
+
 pub struct RequestCompiler;
 
 impl RequestCompiler {
+    pub fn compile(
+        kind: TurnRequestKind,
+        config: &CompileConfig<'_>,
+        history_or_transcript: &[ModelMessage],
+        user_input: &str,
+    ) -> CompiledRequest {
+        match kind {
+            TurnRequestKind::NewTurn => {
+                Self::compile_new_turn(config, history_or_transcript, user_input)
+            }
+            TurnRequestKind::ToolContinuation => {
+                Self::compile_tool_continuation(config, history_or_transcript)
+            }
+            TurnRequestKind::ApprovalResume => {
+                Self::compile_tool_continuation(config, history_or_transcript)
+            }
+        }
+    }
+
     pub fn compile_new_turn(
         config: &CompileConfig<'_>,
         history: &[ModelMessage],

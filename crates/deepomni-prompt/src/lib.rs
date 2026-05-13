@@ -6,6 +6,9 @@
 
 use sha2::{Digest, Sha256};
 
+pub mod request_compiler;
+pub use request_compiler::{CompileConfig, CompiledRequest, RequestCompiler, TurnRequestKind};
+
 /// Result of prompt assembly with cache metadata.
 pub struct BuiltPrompt {
     pub content: String,

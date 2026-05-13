@@ -1,7 +1,7 @@
 //! E2E integration tests — PLAN.md Phase 2-6 scenarios.
 //! Tests the full pipeline: Server → Runtime → Agent → Tool → Journal.
 
-use deepomni_agent::{RunTurnRequest, TurnConfig, TurnResult, TurnRunner};
+use deepomni_agent::{RunTurnRequest, TurnConfig, TurnRequestKind, TurnResult, TurnRunner};
 use deepomni_journal::{InMemoryJournal, TurnJournal};
 use deepomni_policy::{AgentMode, PermissionProfile, PolicyEngine};
 use deepomni_protocol::id::{ThreadId, ToolCallId, TurnId};
@@ -92,6 +92,7 @@ async fn test_e2e_plain_chat_turn() {
     )]));
     let result = runner
         .run_turn(RunTurnRequest {
+            kind: TurnRequestKind::NewTurn,
             thread_id: ThreadId::from_string("e2e-chat"),
             turn_id: TurnId::from_string("e2e-1"),
             user_input: "hi".into(),
@@ -127,6 +128,7 @@ async fn test_e2e_tool_turn_continuation() {
     ]));
     let result = runner
         .run_turn(RunTurnRequest {
+            kind: TurnRequestKind::NewTurn,
             thread_id: ThreadId::from_string("e2e-tool"),
             turn_id: TurnId::from_string("e2e-t1"),
             user_input: "read f".into(),
@@ -165,6 +167,7 @@ async fn test_e2e_approval_needs_approval() {
     )]));
     let result = runner
         .run_turn(RunTurnRequest {
+            kind: TurnRequestKind::NewTurn,
             thread_id: ThreadId::from_string("e2e-a"),
             turn_id: TurnId::from_string("e2e-a1"),
             user_input: "write o".into(),
@@ -204,6 +207,7 @@ async fn test_e2e_approval_resume_after_approve() {
     // Trusted mode auto-approves.
     let result = runner
         .run_turn(RunTurnRequest {
+            kind: TurnRequestKind::NewTurn,
             thread_id: ThreadId::from_string("e2e-trust"),
             turn_id: TurnId::from_string("e2e-tr1"),
             user_input: "write o".into(),
