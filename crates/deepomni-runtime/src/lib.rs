@@ -500,13 +500,14 @@ impl Runtime {
             inner: self.inner.clone(),
         });
         let coordinator = TurnCoordinator::new(turn_services);
-        let loop_handle = SessionLoop::spawn(thread_id.clone(), Arc::new(coordinator));
+        let (loop_handle, event_receiver) =
+            SessionLoop::spawn_with_event_queue(thread_id.clone(), Arc::new(coordinator));
 
         // Register session with engine's SessionManager using the real handle.
         let session_loop_arc = Arc::new(loop_handle.clone());
         self.inner
             .session_manager
-            .register(thread_id.clone(), session_loop_arc)
+            .register_with_events(thread_id.clone(), session_loop_arc, Some(event_receiver))
             .await;
 
         self.inner.active_threads.write().await.insert(
@@ -2206,6 +2207,62 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(sub_id, sub2);
+    }
+
+    #[tokio::test]
+    async fn test_runtime_session_manager_exposes_session_event_queue() {
+        use deepomni_protocol::{EventMsg, op::Op};
+
+        let runtime = RuntimeBuilder::new()
+            .workspace("/tmp/test-session-events")
+            .build()
+            .await
+            .unwrap();
+        let thread = runtime
+            .create_thread(CreateThreadRequest {
+                workspace: std::path::PathBuf::from("/tmp/test-session-events"),
+                model: None,
+                model_provider: None,
+                name: None,
+                approval_policy: None,
+                sandbox: None,
+                parent_thread_id: None,
+                ephemeral: false,
+            })
+            .await
+            .unwrap();
+
+        let mut events = runtime
+            .inner
+            .session_manager
+            .take_event_receiver(&thread.id)
+            .await
+            .expect("Runtime-created sessions should register an event queue");
+
+        let sub_id = runtime
+            .inner
+            .session_manager
+            .submit_to(
+                &thread.id,
+                Op::Cancel {
+                    thread_id: thread.id.clone(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let started = events.recv().await.unwrap();
+        let completed = events.recv().await.unwrap();
+        assert_eq!(started.id, sub_id);
+        assert_eq!(completed.id, sub_id);
+        assert!(matches!(
+            started.msg,
+            EventMsg::SubmissionStarted { ref thread_id } if thread_id == &thread.id
+        ));
+        assert!(matches!(
+            completed.msg,
+            EventMsg::SubmissionCompleted { ref thread_id } if thread_id == &thread.id
+        ));
     }
 
     #[tokio::test]
