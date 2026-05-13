@@ -16,3 +16,4 @@ uuid = { workspace = true }
 deepomni-core = { path = "../deepomni-core" }
 deepomni-policy = { path = "../deepomni-policy" }
 deepomni-protocol = { path = "../deepomni-protocol" }
+deepomni-sandbox = { path = "../deepomni-sandbox" }

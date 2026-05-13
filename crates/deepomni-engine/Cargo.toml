@@ -7,12 +7,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-deepomni-agent = { path = "../deepomni-agent" }
+tokio = { workspace = true }
+deepomni-protocol = { path = "../deepomni-protocol" }
+deepomni-model-provider = { path = "../deepomni-model-provider" }
 deepomni-context = { path = "../deepomni-context" }
 deepomni-journal = { path = "../deepomni-journal" }
-deepomni-model-provider = { path = "../deepomni-model-provider" }
-deepomni-protocol = { path = "../deepomni-protocol" }
-deepomni-tools = { path = "../deepomni-tools" }

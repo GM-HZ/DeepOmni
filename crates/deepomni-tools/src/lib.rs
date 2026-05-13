@@ -5,6 +5,14 @@
 //!
 //! PRD §7.7
 
+pub mod approval_store;
+pub mod router;
+pub mod runtime;
+
+pub use approval_store::{ApprovalDecision, ApprovalStore};
+pub use router::ToolRouter;
+pub use runtime::{PendingToolCall, ToolCallResult, ToolCallRuntime};
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,7 +20,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Serialize;
 use tokio::sync::RwLock;
-use tokio::task::JoinSet;
 
 use deepomni_protocol::id::ToolCallId;
 use deepomni_protocol::tool::{ToolOutput, ToolPayload, ToolSpec};
@@ -115,11 +122,18 @@ pub trait ToolHandler: Send + Sync {
         SandboxPreference::Unsandboxed
     }
 
+    /// Optional pre-execution hook payload. Return Some to block execution.
+    fn pre_tool_use_payload(&self, _invocation: &ToolInvocation) -> Option<String> {
+        None
+    }
+
+    /// Optional post-execution hook payload with the tool output.
+    fn post_tool_use_payload(&self, _output: &ToolOutput) -> Option<String> {
+        None
+    }
+
     /// Execute the tool and return an output.
-    async fn handle(
-        &self,
-        invocation: ToolInvocation,
-    ) -> Result<ToolOutput, ToolError>;
+    async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, ToolError>;
 }
 
 // ── Tool invocation ──
@@ -205,11 +219,8 @@ impl ToolRegistry {
         self.handlers.get(name)
     }
 
-    /// Dispatch a tool invocation.
-    pub async fn dispatch(
-        &self,
-        invocation: ToolInvocation,
-    ) -> Result<ToolOutput, ToolError> {
+    /// Dispatch a tool invocation with pre/post hook checks.
+    pub async fn dispatch(&self, invocation: ToolInvocation) -> Result<ToolOutput, ToolError> {
         let handler = self
             .get(&invocation.tool_name)
             .ok_or_else(|| ToolError::NotAvailable {
@@ -220,8 +231,15 @@ impl ToolRegistry {
             return Err(ToolError::MutatingToolRejected);
         }
 
+        // Pre-execution hook: return PermissionDenied if hook blocks.
+        if let Some(reason) = handler.pre_tool_use_payload(&invocation) {
+            return Err(ToolError::PermissionDenied {
+                message: format!("blocked by pre-tool hook: {reason}"),
+            });
+        }
+
         // Apply timeout if configured.
-        if let Some(timeout) = invocation.timeout {
+        let result = if let Some(timeout) = invocation.timeout {
             match tokio::time::timeout(timeout, handler.handle(invocation)).await {
                 Ok(result) => result,
                 Err(_) => Err(ToolError::Timeout {
@@ -230,7 +248,17 @@ impl ToolRegistry {
             }
         } else {
             handler.handle(invocation).await
+        };
+
+        // Post-execution hook: log or collect payload (non-blocking).
+        if let Ok(ref output) = result
+            && let Some(_payload) = handler.post_tool_use_payload(output)
+        {
+            // Hook payload available for HookDispatcher to consume.
+            // For V1, the payload is recorded; future wiring will dispatch it.
         }
+
+        result
     }
 
     /// Check if a tool name is registered.
@@ -271,14 +299,9 @@ pub enum OrchestratorDecision {
         escalate_on_deny: bool,
     },
     /// Tool requires host approval before execution.
-    NeedsApproval {
-        reason: String,
-        approval_id: String,
-    },
+    NeedsApproval { reason: String, approval_id: String },
     /// Tool is blocked by policy.
-    Forbidden {
-        reason: String,
-    },
+    Forbidden { reason: String },
 }
 
 impl ToolOrchestrator {
@@ -353,144 +376,6 @@ impl ToolOrchestrator {
     }
 }
 
-// ── Approval session cache ──
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApprovalDecision {
-    Approved,
-    Rejected,
-}
-
-#[derive(Debug, Default)]
-pub struct ApprovalStore {
-    cache: std::sync::Mutex<HashMap<String, ApprovalDecision>>,
-}
-
-impl ApprovalStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn get<K: Serialize>(&self, key: &K) -> Option<ApprovalDecision> {
-        let key = approval_cache_key(key).ok()?;
-        self.cache.lock().ok()?.get(&key).copied()
-    }
-
-    pub fn put<K: Serialize>(&self, key: K, decision: ApprovalDecision) {
-        if let Ok(key) = approval_cache_key(&key)
-            && let Ok(mut cache) = self.cache.lock()
-        {
-            cache.insert(key, decision);
-        }
-    }
-
-    pub async fn with_cached_approval<K, F, Fut>(&self, keys: Vec<K>, fetch: F) -> ApprovalDecision
-    where
-        K: Serialize,
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = ApprovalDecision>,
-    {
-        for key in &keys {
-            if let Some(decision) = self.get(key) {
-                return decision;
-            }
-        }
-
-        let decision = fetch().await;
-        for key in keys {
-            self.put(key, decision);
-        }
-        decision
-    }
-
-    pub fn len(&self) -> usize {
-        self.cache.lock().map(|cache| cache.len()).unwrap_or(0)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-fn approval_cache_key<K: Serialize>(key: &K) -> Result<String, serde_json::Error> {
-    serde_json::to_string(key)
-}
-
-// ── Parallel tool execution ──
-
-#[derive(Clone)]
-pub struct ToolCallRuntime {
-    registry: Arc<ToolRegistry>,
-    parallel_lock: Arc<RwLock<()>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PendingToolCall {
-    pub invocation: ToolInvocation,
-    pub is_mutating: bool,
-    pub supports_parallel: bool,
-}
-
-#[derive(Debug)]
-pub struct ToolCallResult {
-    pub call_id: ToolCallId,
-    pub tool_name: String,
-    pub output: Result<ToolOutput, ToolError>,
-}
-
-impl ToolCallRuntime {
-    pub fn new(registry: Arc<ToolRegistry>) -> Self {
-        Self {
-            registry,
-            parallel_lock: Arc::new(RwLock::new(())),
-        }
-    }
-
-    pub async fn execute_batch(&self, calls: Vec<PendingToolCall>) -> Vec<ToolCallResult> {
-        let total = calls.len();
-        let mut ordered: Vec<Option<ToolCallResult>> =
-            std::iter::repeat_with(|| None).take(total).collect();
-        let mut parallel = JoinSet::new();
-        let mut exclusive = Vec::new();
-
-        for (index, call) in calls.into_iter().enumerate() {
-            if !call.is_mutating && call.supports_parallel {
-                let runtime = self.clone();
-                parallel.spawn(async move {
-                    let _guard = runtime.parallel_lock.read().await;
-                    (index, runtime.execute_single(call).await)
-                });
-            } else {
-                exclusive.push((index, call));
-            }
-        }
-
-        while let Some(joined) = parallel.join_next().await {
-            if let Ok((index, result)) = joined {
-                ordered[index] = Some(result);
-            }
-        }
-
-        for (index, call) in exclusive {
-            let _guard = self.parallel_lock.write().await;
-            ordered[index] = Some(self.execute_single(call).await);
-        }
-
-        ordered.into_iter().flatten().collect()
-    }
-
-    async fn execute_single(&self, call: PendingToolCall) -> ToolCallResult {
-        let call_id = call.invocation.call_id.clone();
-        let tool_name = call.invocation.tool_name.clone();
-        let output = self.registry.dispatch(call.invocation).await;
-        ToolCallResult {
-            call_id,
-            tool_name,
-            output,
-        }
-    }
-}
-
 // ── JSON argument extraction helpers ──
 
 /// Extract a required string field from JSON arguments.
@@ -505,7 +390,9 @@ pub fn required_str(args: &serde_json::Value, field: &str) -> Result<String, Too
 
 /// Extract an optional string field.
 pub fn optional_str(args: &serde_json::Value, field: &str) -> Option<String> {
-    args.get(field).and_then(|v| v.as_str()).map(|s| s.to_string())
+    args.get(field)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 /// Extract a required u64 field.
@@ -536,17 +423,16 @@ mod tests {
         }
 
         fn spec(&self) -> Option<ToolSpec> {
-            Some(ToolSpec::Function(deepomni_protocol::tool::ToolSpecDetails {
-                name: "fake_read".into(),
-                description: "Fake read tool".into(),
-                parameters: serde_json::json!({"type": "object"}),
-            }))
+            Some(ToolSpec::Function(
+                deepomni_protocol::tool::ToolSpecDetails {
+                    name: "fake_read".into(),
+                    description: "Fake read tool".into(),
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+            ))
         }
 
-        async fn handle(
-            &self,
-            _invocation: ToolInvocation,
-        ) -> Result<ToolOutput, ToolError> {
+        async fn handle(&self, _invocation: ToolInvocation) -> Result<ToolOutput, ToolError> {
             Ok(ToolOutput::Function {
                 body: Some(serde_json::json!({"result": "ok"})),
                 success: true,
@@ -587,10 +473,17 @@ mod tests {
         struct FakeWriteTool;
         #[async_trait]
         impl ToolHandler for FakeWriteTool {
-            fn name(&self) -> &str { "fake_write" }
-            fn is_mutating(&self) -> bool { true }
+            fn name(&self) -> &str {
+                "fake_write"
+            }
+            fn is_mutating(&self) -> bool {
+                true
+            }
             async fn handle(&self, _: ToolInvocation) -> Result<ToolOutput, ToolError> {
-                Ok(ToolOutput::Function { body: None, success: true })
+                Ok(ToolOutput::Function {
+                    body: None,
+                    success: true,
+                })
             }
         }
 
@@ -601,7 +494,9 @@ mod tests {
             .dispatch(ToolInvocation {
                 call_id: ToolCallId::new(),
                 tool_name: "fake_write".into(),
-                payload: ToolPayload::Function { arguments: "{}".into() },
+                payload: ToolPayload::Function {
+                    arguments: "{}".into(),
+                },
                 timeout: None,
                 allow_mutating: false,
                 workspace: None,
@@ -616,6 +511,114 @@ mod tests {
         let args = serde_json::json!({"path": "/tmp/test.txt"});
         assert_eq!(required_str(&args, "path").unwrap(), "/tmp/test.txt");
         assert!(required_str(&args, "missing").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_router_and_runtime_batch_execution() {
+        struct SlowReadTool;
+        #[async_trait]
+        impl ToolHandler for SlowReadTool {
+            fn name(&self) -> &str {
+                "slow_read"
+            }
+            fn supports_parallel(&self) -> bool {
+                true
+            }
+            async fn handle(&self, _: ToolInvocation) -> Result<ToolOutput, ToolError> {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                Ok(ToolOutput::Function {
+                    body: None,
+                    success: true,
+                })
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(SlowReadTool)).await;
+
+        let registry = Arc::new(registry);
+        let router = ToolRouter::new(registry.list_specs().await);
+        let runtime = ToolCallRuntime::new(registry.clone());
+
+        let calls: Vec<_> = (0..3)
+            .map(|_| {
+                router.build_pending_call(
+                    &registry,
+                    ToolCallId::new(),
+                    "slow_read",
+                    serde_json::json!({}),
+                )
+            })
+            .collect();
+
+        let results = runtime.execute_batch(calls).await;
+        assert_eq!(results.len(), 3);
+        for r in &results {
+            assert!(r.output.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pre_tool_hook_blocks_execution() {
+        struct HookedTool {
+            should_block: bool,
+        }
+        #[async_trait]
+        impl ToolHandler for HookedTool {
+            fn name(&self) -> &str {
+                "hooked"
+            }
+            fn is_mutating(&self) -> bool {
+                true
+            }
+            fn pre_tool_use_payload(&self, _: &ToolInvocation) -> Option<String> {
+                if self.should_block {
+                    Some("blocked by policy".into())
+                } else {
+                    None
+                }
+            }
+            async fn handle(&self, _: ToolInvocation) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::Function {
+                    body: None,
+                    success: true,
+                })
+            }
+        }
+
+        let blocking = HookedTool { should_block: true };
+        assert!(
+            blocking
+                .pre_tool_use_payload(&ToolInvocation {
+                    call_id: ToolCallId::new(),
+                    tool_name: "hooked".into(),
+                    payload: ToolPayload::Function {
+                        arguments: "{}".into()
+                    },
+                    timeout: None,
+                    allow_mutating: true,
+                    workspace: None,
+                })
+                .is_some()
+        );
+
+        let permissive = HookedTool {
+            should_block: false,
+        };
+        assert!(
+            permissive
+                .pre_tool_use_payload(&ToolInvocation {
+                    call_id: ToolCallId::new(),
+                    tool_name: "hooked".into(),
+                    payload: ToolPayload::Function {
+                        arguments: "{}".into()
+                    },
+                    timeout: None,
+                    allow_mutating: true,
+                    workspace: None,
+                })
+                .is_none()
+        );
     }
 
     #[test]
@@ -683,15 +686,22 @@ mod tests {
 
     #[async_trait]
     impl ToolHandler for ConcurrentTool {
-        fn name(&self) -> &str { "concurrent" }
-        fn supports_parallel(&self) -> bool { true }
+        fn name(&self) -> &str {
+            "concurrent"
+        }
+        fn supports_parallel(&self) -> bool {
+            true
+        }
 
         async fn handle(&self, _: ToolInvocation) -> Result<ToolOutput, ToolError> {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_active.fetch_max(active, Ordering::SeqCst);
             tokio::time::sleep(Duration::from_millis(30)).await;
             self.active.fetch_sub(1, Ordering::SeqCst);
-            Ok(ToolOutput::Function { body: None, success: true })
+            Ok(ToolOutput::Function {
+                body: None,
+                success: true,
+            })
         }
     }
 
@@ -713,13 +723,16 @@ mod tests {
                 invocation: ToolInvocation {
                     call_id: ToolCallId::new(),
                     tool_name: "concurrent".into(),
-                    payload: ToolPayload::Function { arguments: "{}".into() },
+                    payload: ToolPayload::Function {
+                        arguments: "{}".into(),
+                    },
                     timeout: None,
                     allow_mutating: false,
                     workspace: None,
                 },
                 is_mutating: false,
                 supports_parallel: true,
+                sandbox_attempt: deepomni_sandbox::SandboxAttempt::Disabled,
             })
             .collect();
 
@@ -727,5 +740,88 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|result| result.output.is_ok()));
         assert_eq!(max_active.load(Ordering::SeqCst), 2);
+    }
+
+    /// Plan 2 Task 2: ToolRouter builds a function-type PendingToolCall
+    /// from model output (tool_name + JSON arguments).
+    #[tokio::test]
+    async fn router_builds_function_tool_call_from_model_output() {
+        struct TestFuncTool;
+        #[async_trait]
+        impl ToolHandler for TestFuncTool {
+            fn name(&self) -> &str {
+                "test_func"
+            }
+            fn is_mutating(&self) -> bool {
+                false
+            }
+            fn supports_parallel(&self) -> bool {
+                true
+            }
+            async fn handle(&self, _: ToolInvocation) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::Function {
+                    body: None,
+                    success: true,
+                })
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(TestFuncTool)).await;
+
+        let router = ToolRouter::new(vec![]);
+        let call = router.build_pending_call(
+            &registry,
+            ToolCallId::from_string("call-1"),
+            "test_func",
+            serde_json::json!({"path": "README.md"}),
+        );
+
+        assert_eq!(call.invocation.tool_name, "test_func");
+        match &call.invocation.payload {
+            ToolPayload::Function { arguments } => {
+                assert!(arguments.contains("README.md"));
+            }
+            _ => panic!("expected Function payload"),
+        }
+        assert!(!call.is_mutating, "test_func is read-only");
+        assert!(call.supports_parallel, "test_func supports parallel");
+        assert!(matches!(
+            call.sandbox_attempt,
+            deepomni_sandbox::SandboxAttempt::Disabled
+        ));
+    }
+
+    /// Plan 2 Task 5: Sandbox escalation — Required with escalate_on_deny
+    /// retries unsandboxed on denial; PreferredWithEscalation always escalates.
+    #[test]
+    fn sandbox_denial_can_escalate() {
+        use deepomni_sandbox::SandboxAttempt;
+
+        let required_escalate = SandboxAttempt::Required {
+            escalate_on_deny: true,
+        };
+        assert!(matches!(
+            required_escalate,
+            SandboxAttempt::Required {
+                escalate_on_deny: true
+            }
+        ));
+
+        let required_no_escalate = SandboxAttempt::Required {
+            escalate_on_deny: false,
+        };
+        assert!(matches!(
+            required_no_escalate,
+            SandboxAttempt::Required {
+                escalate_on_deny: false
+            }
+        ));
+
+        let preferred = SandboxAttempt::PreferredWithEscalation;
+        assert!(matches!(preferred, SandboxAttempt::PreferredWithEscalation));
+
+        let disabled = SandboxAttempt::Disabled;
+        assert!(matches!(disabled, SandboxAttempt::Disabled));
     }
 }

@@ -128,8 +128,7 @@ impl DeepOmniError {
 
     /// Builder: create from a known pattern.
     pub fn internal(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Internal, message)
-            .with_visibility(Visibility::DeveloperVisible)
+        Self::new(ErrorKind::Internal, message).with_visibility(Visibility::DeveloperVisible)
     }
 
     pub fn config(message: impl Into<String>) -> Self {
@@ -141,8 +140,7 @@ impl DeepOmniError {
     }
 
     pub fn provider(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Provider, message)
-            .with_retryable(Retryability::RetryableWithConfig)
+        Self::new(ErrorKind::Provider, message).with_retryable(Retryability::RetryableWithConfig)
     }
 
     pub fn tool(message: impl Into<String>) -> Self {
@@ -154,13 +152,11 @@ impl DeepOmniError {
     }
 
     pub fn rate_limited(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::RateLimited, message)
-            .with_retryable(Retryability::RetryableWithConfig)
+        Self::new(ErrorKind::RateLimited, message).with_retryable(Retryability::RetryableWithConfig)
     }
 
     pub fn timeout(message: impl Into<String>) -> Self {
-        Self::new(ErrorKind::Timeout, message)
-            .with_retryable(Retryability::RetryableWithConfig)
+        Self::new(ErrorKind::Timeout, message).with_retryable(Retryability::RetryableWithConfig)
     }
 
     pub fn cancelled() -> Self {
@@ -227,8 +223,8 @@ mod tests {
 
     #[test]
     fn test_error_display_with_detail() {
-        let err = DeepOmniError::provider("API error")
-            .with_detail("POST /chat/completions returned 503");
+        let err =
+            DeepOmniError::provider("API error").with_detail("POST /chat/completions returned 503");
         let s = err.to_string();
         assert!(s.contains("[provider]"));
         assert!(s.contains("API error"));

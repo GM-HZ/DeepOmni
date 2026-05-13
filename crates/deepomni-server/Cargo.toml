@@ -20,3 +20,7 @@ deepomni-protocol = { path = "../deepomni-protocol" }
 deepomni-runtime = { path = "../deepomni-runtime" }
 deepomni-config = { path = "../deepomni-config" }
 deepomni-events = { path = "../deepomni-events" }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+deepomni-runtime = { path = "../deepomni-runtime" }

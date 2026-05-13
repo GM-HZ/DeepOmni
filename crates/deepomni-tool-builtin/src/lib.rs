@@ -25,7 +25,9 @@ fn resolve_workspace_path(requested: &str, workspace: &str) -> Result<PathBuf, T
     let path = Path::new(requested);
     if path.is_absolute() {
         if !requested.starts_with(workspace) {
-            return Err(ToolError::PathEscape { path: requested.into() });
+            return Err(ToolError::PathEscape {
+                path: requested.into(),
+            });
         }
         return Ok(path.to_path_buf());
     }
@@ -34,14 +36,20 @@ fn resolve_workspace_path(requested: &str, workspace: &str) -> Result<PathBuf, T
 
 /// Get the effective workspace from invocation or fallback.
 fn effective_workspace(invocation: &ToolInvocation, fallback: &str) -> String {
-    invocation.workspace.clone().unwrap_or_else(|| fallback.to_string())
+    invocation
+        .workspace
+        .clone()
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 fn truncate_output(content: &str) -> String {
     if content.len() > MAX_OUTPUT_SIZE {
         let head = &content[..MAX_OUTPUT_SIZE / 2];
         let tail = &content[content.len() - MAX_OUTPUT_SIZE / 2..];
-        format!("{head}\n\n... [output truncated, {len} total bytes] ...\n\n{tail}", len = content.len())
+        format!(
+            "{head}\n\n... [output truncated, {len} total bytes] ...\n\n{tail}",
+            len = content.len()
+        )
     } else {
         content.to_string()
     }
@@ -55,8 +63,12 @@ pub struct ReadFileTool {
 
 #[async_trait]
 impl ToolHandler for ReadFileTool {
-    fn name(&self) -> &str { "read_file" }
-    fn is_mutating(&self) -> bool { false }
+    fn name(&self) -> &str {
+        "read_file"
+    }
+    fn is_mutating(&self) -> bool {
+        false
+    }
     fn capabilities(&self) -> Vec<ToolCapability> {
         vec![ToolCapability::ReadOnly]
     }
@@ -86,9 +98,11 @@ impl ToolHandler for ReadFileTool {
                     message: e.to_string(),
                 })?
             }
-            _ => return Err(ToolError::InvalidInput {
-                message: "expected function call".into(),
-            }),
+            _ => {
+                return Err(ToolError::InvalidInput {
+                    message: "expected function call".into(),
+                });
+            }
         };
 
         let path_str = deepomni_tools::required_str(&args, "path")?;
@@ -117,8 +131,12 @@ pub struct WriteFileTool {
 
 #[async_trait]
 impl ToolHandler for WriteFileTool {
-    fn name(&self) -> &str { "write_file" }
-    fn is_mutating(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "write_file"
+    }
+    fn is_mutating(&self) -> bool {
+        true
+    }
     fn capabilities(&self) -> Vec<ToolCapability> {
         vec![ToolCapability::WritesFiles, ToolCapability::Sandboxable]
     }
@@ -151,9 +169,11 @@ impl ToolHandler for WriteFileTool {
                     message: e.to_string(),
                 })?
             }
-            _ => return Err(ToolError::InvalidInput {
-                message: "expected function call".into(),
-            }),
+            _ => {
+                return Err(ToolError::InvalidInput {
+                    message: "expected function call".into(),
+                });
+            }
         };
 
         let path_str = deepomni_tools::required_str(&args, "path")?;
@@ -189,8 +209,12 @@ pub struct EditFileTool {
 
 #[async_trait]
 impl ToolHandler for EditFileTool {
-    fn name(&self) -> &str { "edit_file" }
-    fn is_mutating(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "edit_file"
+    }
+    fn is_mutating(&self) -> bool {
+        true
+    }
     fn capabilities(&self) -> Vec<ToolCapability> {
         vec![ToolCapability::WritesFiles, ToolCapability::Sandboxable]
     }
@@ -219,9 +243,11 @@ impl ToolHandler for EditFileTool {
                     message: e.to_string(),
                 })?
             }
-            _ => return Err(ToolError::InvalidInput {
-                message: "expected function call".into(),
-            }),
+            _ => {
+                return Err(ToolError::InvalidInput {
+                    message: "expected function call".into(),
+                });
+            }
         };
 
         let path_str = deepomni_tools::required_str(&args, "path")?;
@@ -262,8 +288,12 @@ pub struct GrepTool {
 
 #[async_trait]
 impl ToolHandler for GrepTool {
-    fn name(&self) -> &str { "grep" }
-    fn is_mutating(&self) -> bool { false }
+    fn name(&self) -> &str {
+        "grep"
+    }
+    fn is_mutating(&self) -> bool {
+        false
+    }
     fn capabilities(&self) -> Vec<ToolCapability> {
         vec![ToolCapability::ReadOnly]
     }
@@ -291,20 +321,31 @@ impl ToolHandler for GrepTool {
                     message: e.to_string(),
                 })?
             }
-            _ => return Err(ToolError::InvalidInput {
-                message: "expected function call".into(),
-            }),
+            _ => {
+                return Err(ToolError::InvalidInput {
+                    message: "expected function call".into(),
+                });
+            }
         };
 
         let pattern = deepomni_tools::required_str(&args, "pattern")?;
-        let search_path = deepomni_tools::optional_str(&args, "path")
-            .unwrap_or_else(|| ".".into());
+        let search_path = deepomni_tools::optional_str(&args, "path").unwrap_or_else(|| ".".into());
 
         let output = Command::new("grep")
-            .args(["-rn", "--include=*.rs", "--include=*.toml", "--include=*.md",
-                   "--include=*.json", "--include=*.py", "--include=*.js",
-                   "--include=*.ts", "--include=*.go", "--include=*.java",
-                   &pattern, &search_path])
+            .args([
+                "-rn",
+                "--include=*.rs",
+                "--include=*.toml",
+                "--include=*.md",
+                "--include=*.json",
+                "--include=*.py",
+                "--include=*.js",
+                "--include=*.ts",
+                "--include=*.go",
+                "--include=*.java",
+                &pattern,
+                &search_path,
+            ])
             .current_dir(&ws)
             .output()
             .map_err(|e| ToolError::ExecutionFailed {
@@ -329,8 +370,12 @@ pub struct ListFilesTool {
 
 #[async_trait]
 impl ToolHandler for ListFilesTool {
-    fn name(&self) -> &str { "list_files" }
-    fn is_mutating(&self) -> bool { false }
+    fn name(&self) -> &str {
+        "list_files"
+    }
+    fn is_mutating(&self) -> bool {
+        false
+    }
     fn capabilities(&self) -> Vec<ToolCapability> {
         vec![ToolCapability::ReadOnly]
     }
@@ -357,9 +402,11 @@ impl ToolHandler for ListFilesTool {
                     message: e.to_string(),
                 })?
             }
-            _ => return Err(ToolError::InvalidInput {
-                message: "expected function call".into(),
-            }),
+            _ => {
+                return Err(ToolError::InvalidInput {
+                    message: "expected function call".into(),
+                });
+            }
         };
 
         let ws = effective_workspace(&invocation, &self.workspace);
@@ -389,9 +436,10 @@ fn walk_dir(path: &Path, current: u32, max_depth: u32, entries: &mut Vec<String>
         Err(_) => return,
     };
     for entry in dir.flatten() {
-        let file_type = entry.file_type().map(|t| {
-            if t.is_dir() { "d" } else { "f" }
-        }).unwrap_or("?");
+        let file_type = entry
+            .file_type()
+            .map(|t| if t.is_dir() { "d" } else { "f" })
+            .unwrap_or("?");
         let name = entry.file_name().to_string_lossy().to_string();
         let prefix = "  ".repeat(current as usize);
 
@@ -416,10 +464,18 @@ pub struct ShellExecTool {
 
 #[async_trait]
 impl ToolHandler for ShellExecTool {
-    fn name(&self) -> &str { "shell_exec" }
-    fn is_mutating(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "shell_exec"
+    }
+    fn is_mutating(&self) -> bool {
+        true
+    }
     fn capabilities(&self) -> Vec<ToolCapability> {
-        vec![ToolCapability::ExecutesCode, ToolCapability::Sandboxable, ToolCapability::Network]
+        vec![
+            ToolCapability::ExecutesCode,
+            ToolCapability::Sandboxable,
+            ToolCapability::Network,
+        ]
     }
 
     fn spec(&self) -> Option<ToolSpec> {
@@ -444,9 +500,11 @@ impl ToolHandler for ShellExecTool {
                     message: e.to_string(),
                 })?
             }
-            _ => return Err(ToolError::InvalidInput {
-                message: "expected function call".into(),
-            }),
+            _ => {
+                return Err(ToolError::InvalidInput {
+                    message: "expected function call".into(),
+                });
+            }
         };
 
         let ws = effective_workspace(&invocation, &self.workspace);
@@ -495,8 +553,12 @@ pub struct GitStatusTool {
 
 #[async_trait]
 impl ToolHandler for GitStatusTool {
-    fn name(&self) -> &str { "git_status" }
-    fn is_mutating(&self) -> bool { false }
+    fn name(&self) -> &str {
+        "git_status"
+    }
+    fn is_mutating(&self) -> bool {
+        false
+    }
     fn capabilities(&self) -> Vec<ToolCapability> {
         vec![ToolCapability::ReadOnly, ToolCapability::ExecutesCode]
     }
@@ -543,8 +605,12 @@ pub struct GitDiffTool {
 
 #[async_trait]
 impl ToolHandler for GitDiffTool {
-    fn name(&self) -> &str { "git_diff" }
-    fn is_mutating(&self) -> bool { false }
+    fn name(&self) -> &str {
+        "git_diff"
+    }
+    fn is_mutating(&self) -> bool {
+        false
+    }
     fn capabilities(&self) -> Vec<ToolCapability> {
         vec![ToolCapability::ReadOnly, ToolCapability::ExecutesCode]
     }
@@ -570,22 +636,30 @@ impl ToolHandler for GitDiffTool {
                     message: e.to_string(),
                 })?
             }
-            _ => return Err(ToolError::InvalidInput {
-                message: "expected function call".into(),
-            }),
+            _ => {
+                return Err(ToolError::InvalidInput {
+                    message: "expected function call".into(),
+                });
+            }
         };
 
         let ws = effective_workspace(&invocation, &self.workspace);
-        let staged = args.get("staged").and_then(|v| v.as_bool()).unwrap_or(false);
+        let staged = args
+            .get("staged")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let mut cmd = Command::new("git");
         cmd.arg("diff");
         if staged {
             cmd.arg("--staged");
         }
-        let output = cmd.current_dir(&ws).output().map_err(|e| {
-            ToolError::ExecutionFailed { message: format!("git diff failed: {e}") }
-        })?;
+        let output = cmd
+            .current_dir(&ws)
+            .output()
+            .map_err(|e| ToolError::ExecutionFailed {
+                message: format!("git diff failed: {e}"),
+            })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(ToolOutput::Function {
@@ -605,10 +679,18 @@ pub struct GitApplyTool {
 
 #[async_trait]
 impl ToolHandler for GitApplyTool {
-    fn name(&self) -> &str { "git_apply" }
-    fn is_mutating(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "git_apply"
+    }
+    fn is_mutating(&self) -> bool {
+        true
+    }
     fn capabilities(&self) -> Vec<ToolCapability> {
-        vec![ToolCapability::WritesFiles, ToolCapability::ExecutesCode, ToolCapability::Sandboxable]
+        vec![
+            ToolCapability::WritesFiles,
+            ToolCapability::ExecutesCode,
+            ToolCapability::Sandboxable,
+        ]
     }
 
     fn spec(&self) -> Option<ToolSpec> {
@@ -632,9 +714,11 @@ impl ToolHandler for GitApplyTool {
                     message: e.to_string(),
                 })?
             }
-            _ => return Err(ToolError::InvalidInput {
-                message: "expected function call".into(),
-            }),
+            _ => {
+                return Err(ToolError::InvalidInput {
+                    message: "expected function call".into(),
+                });
+            }
         };
 
         let ws = effective_workspace(&invocation, &self.workspace);
@@ -676,8 +760,12 @@ pub struct ApplyPatchTool {
 
 #[async_trait]
 impl ToolHandler for ApplyPatchTool {
-    fn name(&self) -> &str { "apply_patch" }
-    fn is_mutating(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "apply_patch"
+    }
+    fn is_mutating(&self) -> bool {
+        true
+    }
     fn capabilities(&self) -> Vec<ToolCapability> {
         vec![ToolCapability::WritesFiles, ToolCapability::Sandboxable]
     }
@@ -704,9 +792,11 @@ impl ToolHandler for ApplyPatchTool {
                     message: e.to_string(),
                 })?
             }
-            _ => return Err(ToolError::InvalidInput {
-                message: "expected function call".into(),
-            }),
+            _ => {
+                return Err(ToolError::InvalidInput {
+                    message: "expected function call".into(),
+                });
+            }
         };
 
         let ws = effective_workspace(&invocation, &self.workspace);
@@ -773,8 +863,12 @@ pub struct TodoUpdateTool;
 
 #[async_trait]
 impl ToolHandler for TodoUpdateTool {
-    fn name(&self) -> &str { "todo_update" }
-    fn is_mutating(&self) -> bool { false }
+    fn name(&self) -> &str {
+        "todo_update"
+    }
+    fn is_mutating(&self) -> bool {
+        false
+    }
     fn capabilities(&self) -> Vec<ToolCapability> {
         vec![ToolCapability::ReadOnly]
     }
@@ -810,9 +904,11 @@ impl ToolHandler for TodoUpdateTool {
                     message: e.to_string(),
                 })?
             }
-            _ => return Err(ToolError::InvalidInput {
-                message: "expected function call".into(),
-            }),
+            _ => {
+                return Err(ToolError::InvalidInput {
+                    message: "expected function call".into(),
+                });
+            }
         };
 
         let tasks = args.get("tasks").cloned().unwrap_or_default();
@@ -829,31 +925,68 @@ impl ToolHandler for TodoUpdateTool {
 // ── Convenience: register all built-in tools ──
 
 /// Register all built-in tools with a tool registry.
-pub async fn register_all(
-    registry: &mut deepomni_tools::ToolRegistry,
-    workspace: &str,
-) {
+pub async fn register_all(registry: &mut deepomni_tools::ToolRegistry, workspace: &str) {
     let ws = workspace.to_string();
 
-    registry.register(Arc::new(ReadFileTool { workspace: ws.clone() })).await;
-    registry.register(Arc::new(WriteFileTool { workspace: ws.clone() })).await;
-    registry.register(Arc::new(EditFileTool { workspace: ws.clone() })).await;
-    registry.register(Arc::new(GrepTool { workspace: ws.clone() })).await;
-    registry.register(Arc::new(ListFilesTool { workspace: ws.clone() })).await;
-    registry.register(Arc::new(ShellExecTool { workspace: ws.clone() })).await;
-    registry.register(Arc::new(GitStatusTool { workspace: ws.clone() })).await;
-    registry.register(Arc::new(GitDiffTool { workspace: ws.clone() })).await;
-    registry.register(Arc::new(GitApplyTool { workspace: ws.clone() })).await;
-    registry.register(Arc::new(ApplyPatchTool { workspace: ws.clone() })).await;
+    registry
+        .register(Arc::new(ReadFileTool {
+            workspace: ws.clone(),
+        }))
+        .await;
+    registry
+        .register(Arc::new(WriteFileTool {
+            workspace: ws.clone(),
+        }))
+        .await;
+    registry
+        .register(Arc::new(EditFileTool {
+            workspace: ws.clone(),
+        }))
+        .await;
+    registry
+        .register(Arc::new(GrepTool {
+            workspace: ws.clone(),
+        }))
+        .await;
+    registry
+        .register(Arc::new(ListFilesTool {
+            workspace: ws.clone(),
+        }))
+        .await;
+    registry
+        .register(Arc::new(ShellExecTool {
+            workspace: ws.clone(),
+        }))
+        .await;
+    registry
+        .register(Arc::new(GitStatusTool {
+            workspace: ws.clone(),
+        }))
+        .await;
+    registry
+        .register(Arc::new(GitDiffTool {
+            workspace: ws.clone(),
+        }))
+        .await;
+    registry
+        .register(Arc::new(GitApplyTool {
+            workspace: ws.clone(),
+        }))
+        .await;
+    registry
+        .register(Arc::new(ApplyPatchTool {
+            workspace: ws.clone(),
+        }))
+        .await;
     registry.register(Arc::new(TodoUpdateTool)).await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use deepomni_tools::ToolRegistry;
     use deepomni_protocol::id::ToolCallId;
+    use deepomni_tools::ToolRegistry;
+    use std::fs;
 
     fn test_workspace() -> String {
         let dir = std::env::temp_dir().join(format!("deepomni-tool-test-{}", uuid::Uuid::new_v4()));
@@ -866,20 +999,25 @@ mod tests {
         let ws = test_workspace();
         fs::write(PathBuf::from(&ws).join("hello.txt"), "hello world").unwrap();
 
-        let tool = ReadFileTool { workspace: ws.clone() };
+        let tool = ReadFileTool {
+            workspace: ws.clone(),
+        };
         assert_eq!(tool.name(), "read_file");
         assert!(!tool.is_mutating());
 
-        let result = tool.handle(ToolInvocation {
-            call_id: ToolCallId::new(),
-            tool_name: "read_file".into(),
-            payload: ToolPayload::Function {
-                arguments: r#"{"path":"hello.txt"}"#.into(),
-            },
-            timeout: None,
-            allow_mutating: false,
-            workspace: None,
-        }).await.unwrap();
+        let result = tool
+            .handle(ToolInvocation {
+                call_id: ToolCallId::new(),
+                tool_name: "read_file".into(),
+                payload: ToolPayload::Function {
+                    arguments: r#"{"path":"hello.txt"}"#.into(),
+                },
+                timeout: None,
+                allow_mutating: false,
+                workspace: None,
+            })
+            .await
+            .unwrap();
 
         match result {
             ToolOutput::Function { body, success } => {
@@ -894,18 +1032,23 @@ mod tests {
     #[tokio::test]
     async fn test_write_file_tool() {
         let ws = test_workspace();
-        let tool = WriteFileTool { workspace: ws.clone() };
+        let tool = WriteFileTool {
+            workspace: ws.clone(),
+        };
 
-        let result = tool.handle(ToolInvocation {
-            call_id: ToolCallId::new(),
-            tool_name: "write_file".into(),
-            payload: ToolPayload::Function {
-                arguments: r#"{"path":"out.txt","content":"written"}"#.into(),
-            },
-            timeout: None,
-            allow_mutating: true,
-            workspace: None,
-        }).await.unwrap();
+        let result = tool
+            .handle(ToolInvocation {
+                call_id: ToolCallId::new(),
+                tool_name: "write_file".into(),
+                payload: ToolPayload::Function {
+                    arguments: r#"{"path":"out.txt","content":"written"}"#.into(),
+                },
+                timeout: None,
+                allow_mutating: true,
+                workspace: None,
+            })
+            .await
+            .unwrap();
 
         match result {
             ToolOutput::Function { success, .. } => assert!(success),
@@ -921,16 +1064,19 @@ mod tests {
         let ws = test_workspace();
         let tool = ShellExecTool { workspace: ws };
 
-        let result = tool.handle(ToolInvocation {
-            call_id: ToolCallId::new(),
-            tool_name: "shell_exec".into(),
-            payload: ToolPayload::Function {
-                arguments: r#"{"command":"echo hello"}"#.into(),
-            },
-            timeout: None,
-            allow_mutating: true,
-            workspace: None,
-        }).await.unwrap();
+        let result = tool
+            .handle(ToolInvocation {
+                call_id: ToolCallId::new(),
+                tool_name: "shell_exec".into(),
+                payload: ToolPayload::Function {
+                    arguments: r#"{"command":"echo hello"}"#.into(),
+                },
+                timeout: None,
+                allow_mutating: true,
+                workspace: None,
+            })
+            .await
+            .unwrap();
 
         match result {
             ToolOutput::Function { body, success } => {

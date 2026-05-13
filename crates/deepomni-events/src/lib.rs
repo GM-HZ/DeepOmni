@@ -7,7 +7,7 @@
 //! Architecture: PRD §9, §19.4
 
 use std::collections::HashMap;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 
 use deepomni_protocol::{EventEnvelope, EventFrame, ThreadId};
 
@@ -106,7 +106,10 @@ impl EventBus {
         // Broadcast with the authoritative persisted seq.
         let senders = self.senders.read().await;
         if let Some(sender) = senders.get(&thread_id) {
-            let _ = sender.send(EventEnvelope { seq: authoritative_seq, frame: event });
+            let _ = sender.send(EventEnvelope {
+                seq: authoritative_seq,
+                frame: event,
+            });
         }
 
         Ok(())

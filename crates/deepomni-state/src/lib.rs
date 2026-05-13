@@ -5,16 +5,16 @@
 //!
 //! Adapted from DeepSeek-TUI state patterns.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 // Re-export protocol types used in stored records.
-use deepomni_protocol::{EventFrame, TurnItem};
 use deepomni_journal::{JournalEntry, JournalError, JournalRecord, JournalSubscriber, TurnJournal};
+use deepomni_protocol::{EventFrame, TurnItem};
 
 /// Default state database path: `~/.deepomni/state.db`.
 pub fn default_state_db_path() -> PathBuf {
@@ -429,9 +429,7 @@ impl StateStore {
                     created_at: row.get(4)?,
                     updated_at: row.get(5)?,
                     status: row.get(6)?,
-                    path: row
-                        .get::<_, Option<String>>(7)?
-                        .map(PathBuf::from),
+                    path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
                     cwd: row.get(8)?,
                     cli_version: row.get(9)?,
                     source: row.get(10)?,
@@ -485,7 +483,12 @@ impl StateStore {
         Ok(())
     }
 
-    pub fn update_turn_status(&self, turn_id: &str, status: &str, completed_at: Option<i64>) -> Result<(), StateError> {
+    pub fn update_turn_status(
+        &self,
+        turn_id: &str,
+        status: &str,
+        completed_at: Option<i64>,
+    ) -> Result<(), StateError> {
         let conn = self.conn()?;
         conn.execute(
             "UPDATE turns SET status = ?1, completed_at = ?2 WHERE id = ?3",
@@ -591,10 +594,7 @@ impl StateStore {
     }
 
     /// Reconstruct the full turn transcript from persisted items.
-    pub fn get_turn_items(
-        &self,
-        turn_id: &str,
-    ) -> Result<Vec<(i64, TurnItem)>, StateError> {
+    pub fn get_turn_items(&self, turn_id: &str) -> Result<Vec<(i64, TurnItem)>, StateError> {
         let conn = self.conn()?;
         let mut stmt = conn
             .prepare("SELECT seq, item_json FROM turn_items WHERE turn_id = ?1 ORDER BY seq ASC")
@@ -656,10 +656,11 @@ impl StateStore {
                 row.map_err(|e| StateError::QueryError {
                     message: format!("failed to read journal turn row: {e}"),
                 })?;
-            let entry = serde_json::from_str::<JournalEntry>(&entry_json)
-                .map_err(|e| StateError::QueryError {
+            let entry = serde_json::from_str::<JournalEntry>(&entry_json).map_err(|e| {
+                StateError::QueryError {
                     message: format!("failed to deserialize journal entry: {e}"),
-                })?;
+                }
+            })?;
             records.push(JournalRecord {
                 seq,
                 thread_id: deepomni_protocol::ThreadId::from_string(&thread_id),
@@ -684,17 +685,28 @@ impl StateStore {
     }
 
     /// Update the status of a pending approval.
-    pub fn update_pending_approval_status(&self, approval_id: &str, status: &str) -> Result<(), StateError> {
+    pub fn update_pending_approval_status(
+        &self,
+        approval_id: &str,
+        status: &str,
+    ) -> Result<(), StateError> {
         let conn = self.conn()?;
         conn.execute(
             "UPDATE pending_approvals SET status = ?1 WHERE approval_id = ?2",
             params![status, approval_id],
-        ).map_err(|e| StateError::QueryError { message: format!("update pending approval: {e}") })?;
+        )
+        .map_err(|e| StateError::QueryError {
+            message: format!("update pending approval: {e}"),
+        })?;
         Ok(())
     }
 
     /// Get a pending approval by turn_id.
-    pub fn get_pending_approval_by_turn(&self, thread_id: &str, turn_id: &str) -> Result<Option<PendingApprovalRecord>, StateError> {
+    pub fn get_pending_approval_by_turn(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<PendingApprovalRecord>, StateError> {
         let conn = self.conn()?;
         conn.query_row(
             "SELECT approval_id, thread_id, turn_id, call_id, tool_name, arguments_json, model, workspace, config_json, status, created_at FROM pending_approvals WHERE thread_id = ?1 AND turn_id = ?2 AND status = 'pending'",
@@ -742,9 +754,10 @@ impl StateStore {
         event: &EventFrame,
     ) -> Result<i64, StateError> {
         let conn = self.conn()?;
-        conn.execute("BEGIN IMMEDIATE", []).map_err(|e| {
-            StateError::QueryError { message: format!("begin tx: {e}") }
-        })?;
+        conn.execute("BEGIN IMMEDIATE", [])
+            .map_err(|e| StateError::QueryError {
+                message: format!("begin tx: {e}"),
+            })?;
 
         let result = (|| {
             let max_seq: Option<i64> = conn
@@ -777,9 +790,10 @@ impl StateStore {
 
         match result {
             Ok(seq) => {
-                conn.execute("COMMIT", []).map_err(|e| {
-                    StateError::QueryError { message: format!("commit tx: {e}") }
-                })?;
+                conn.execute("COMMIT", [])
+                    .map_err(|e| StateError::QueryError {
+                        message: format!("commit tx: {e}"),
+                    })?;
                 Ok(seq)
             }
             Err(e) => {
@@ -823,7 +837,13 @@ impl TurnJournal for StateStore {
                 INSERT INTO journal_entries (thread_id, turn_id, seq, entry_json, created_at)
                 VALUES (?1, ?2, ?3, ?4, ?5)
                 "#,
-                params![thread_id.as_str(), turn_id.as_str(), seq, entry_json, created_at],
+                params![
+                    thread_id.as_str(),
+                    turn_id.as_str(),
+                    seq,
+                    entry_json,
+                    created_at
+                ],
             )
             .map_err(|e| JournalError::Storage(format!("failed to append journal entry: {e}")))?;
 
@@ -866,7 +886,9 @@ impl TurnJournal for StateStore {
                         "UPDATE pending_approvals SET status = ?1 WHERE approval_id = ?2",
                         params![status, approval_id],
                     )
-                    .map_err(|e| JournalError::Storage(format!("project approval resolution: {e}")))?;
+                    .map_err(|e| {
+                        JournalError::Storage(format!("project approval resolution: {e}"))
+                    })?;
                 }
                 _ => {}
             }
@@ -940,7 +962,10 @@ impl TurnJournal for StateStore {
 
     fn subscribe(&self, thread_id: deepomni_protocol::ThreadId) -> JournalSubscriber {
         let sender = {
-            let mut senders = self.journal_senders.lock().expect("journal sender mutex poisoned");
+            let mut senders = self
+                .journal_senders
+                .lock()
+                .expect("journal sender mutex poisoned");
             senders
                 .entry(thread_id.to_string())
                 .or_insert_with(|| tokio::sync::broadcast::channel(256).0)
@@ -953,11 +978,7 @@ impl TurnJournal for StateStore {
 // ── Helpers ──
 
 fn bool_to_i64(b: bool) -> i64 {
-    if b {
-        1
-    } else {
-        0
-    }
+    if b { 1 } else { 0 }
 }
 
 fn i64_to_bool(i: i64) -> bool {
@@ -995,7 +1016,11 @@ impl std::fmt::Display for StateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StateError::OpenError { path, message } => {
-                write!(f, "failed to open state db at {}: {message}", path.display())
+                write!(
+                    f,
+                    "failed to open state db at {}: {message}",
+                    path.display()
+                )
             }
             StateError::SchemaError { message } => {
                 write!(f, "schema error: {message}")
@@ -1065,38 +1090,42 @@ mod tests {
         let turn_id = "turn-ev-1";
 
         // Create parent records so FK constraints pass.
-        store.upsert_thread(&ThreadRecord {
-            id: thread_id.to_string(),
-            preview: String::new(),
-            ephemeral: false,
-            model_provider: "deepseek".into(),
-            created_at: current_timestamp(),
-            updated_at: current_timestamp(),
-            status: "idle".into(),
-            path: None,
-            cwd: ".".into(),
-            cli_version: "0.1.0".into(),
-            source: "interactive".into(),
-            name: None,
-            sandbox_policy: None,
-            approval_mode: None,
-            archived: false,
-            archived_at: None,
-            parent_thread_id: None,
-        }).unwrap();
-        store.insert_turn(&TurnRecord {
-            id: turn_id.to_string(),
-            thread_id: thread_id.to_string(),
-            status: "started".into(),
-            user_input: "hello".into(),
-            created_at: current_timestamp(),
-            completed_at: None,
-            model: None,
-            model_provider: None,
-            parent_turn_id: None,
-            parent_thread_id: None,
-            subagent_id: None,
-        }).unwrap();
+        store
+            .upsert_thread(&ThreadRecord {
+                id: thread_id.to_string(),
+                preview: String::new(),
+                ephemeral: false,
+                model_provider: "deepseek".into(),
+                created_at: current_timestamp(),
+                updated_at: current_timestamp(),
+                status: "idle".into(),
+                path: None,
+                cwd: ".".into(),
+                cli_version: "0.1.0".into(),
+                source: "interactive".into(),
+                name: None,
+                sandbox_policy: None,
+                approval_mode: None,
+                archived: false,
+                archived_at: None,
+                parent_thread_id: None,
+            })
+            .unwrap();
+        store
+            .insert_turn(&TurnRecord {
+                id: turn_id.to_string(),
+                thread_id: thread_id.to_string(),
+                status: "started".into(),
+                user_input: "hello".into(),
+                created_at: current_timestamp(),
+                completed_at: None,
+                model: None,
+                model_provider: None,
+                parent_turn_id: None,
+                parent_thread_id: None,
+                subagent_id: None,
+            })
+            .unwrap();
 
         let event = EventFrame::TurnStarted {
             thread_id: deepomni_protocol::ThreadId::from_string(thread_id),

@@ -234,13 +234,15 @@ impl ConfigStore {
         // Provider kind resolution: CLI > workspace > user > default.
         let provider = cli
             .provider
-            .or_else(|| workspace_config.as_ref().and_then(|w| {
-                if w.provider != ProviderKind::Deepseek {
-                    Some(w.provider)
-                } else {
-                    None
-                }
-            }))
+            .or_else(|| {
+                workspace_config.as_ref().and_then(|w| {
+                    if w.provider != ProviderKind::Deepseek {
+                        Some(w.provider)
+                    } else {
+                        None
+                    }
+                })
+            })
             .unwrap_or(merged.provider);
 
         let provider_cfg = merged.providers.for_provider(provider);
@@ -263,11 +265,7 @@ impl ConfigStore {
             .model
             .clone()
             .or_else(|| std::env::var("DEEPOMNI_MODEL").ok())
-            .or_else(|| {
-                workspace_config
-                    .as_ref()
-                    .and_then(|w| w.model.clone())
-            })
+            .or_else(|| workspace_config.as_ref().and_then(|w| w.model.clone()))
             .or_else(|| provider_cfg.model.clone())
             .or_else(|| merged.model.clone())
             .unwrap_or_else(|| DEFAULT_DEEPSEEK_MODEL.to_string());
@@ -285,7 +283,11 @@ impl ConfigStore {
         let approval_policy = cli
             .approval_policy
             .clone()
-            .or_else(|| workspace_config.as_ref().and_then(|w| w.approval_policy.clone()))
+            .or_else(|| {
+                workspace_config
+                    .as_ref()
+                    .and_then(|w| w.approval_policy.clone())
+            })
             .or_else(|| merged.approval_policy.clone())
             .unwrap_or_else(|| "unless_trusted".to_string());
 
@@ -293,7 +295,11 @@ impl ConfigStore {
         let sandbox_mode = cli
             .sandbox_mode
             .clone()
-            .or_else(|| workspace_config.as_ref().and_then(|w| w.sandbox_mode.clone()))
+            .or_else(|| {
+                workspace_config
+                    .as_ref()
+                    .and_then(|w| w.sandbox_mode.clone())
+            })
             .or_else(|| merged.sandbox_mode.clone())
             .unwrap_or_else(|| "auto".to_string());
 
@@ -305,9 +311,7 @@ impl ConfigStore {
 
         // Plugin paths.
         let home = dirs::home_dir().unwrap_or_default();
-        let mut plugin_paths = vec![
-            home.join(".deepomni").join("plugins"),
-        ];
+        let mut plugin_paths = vec![home.join(".deepomni").join("plugins")];
         if let Some(ref pc) = merged.plugins {
             plugin_paths.extend(pc.extra_paths.iter().cloned());
         }
@@ -316,9 +320,7 @@ impl ConfigStore {
         }
 
         // Skill paths.
-        let mut skill_paths = vec![
-            home.join(".deepomni").join("skills"),
-        ];
+        let mut skill_paths = vec![home.join(".deepomni").join("skills")];
         if let Some(ref sc) = merged.skills {
             skill_paths.extend(sc.extra_paths.iter().cloned());
         }
@@ -438,9 +440,15 @@ mod tests {
 
     #[test]
     fn test_provider_kind_parse() {
-        assert_eq!(ProviderKind::parse("deepseek"), Some(ProviderKind::Deepseek));
+        assert_eq!(
+            ProviderKind::parse("deepseek"),
+            Some(ProviderKind::Deepseek)
+        );
         assert_eq!(ProviderKind::parse("openai"), Some(ProviderKind::Openai));
-        assert_eq!(ProviderKind::parse("ollama-local"), Some(ProviderKind::Ollama));
+        assert_eq!(
+            ProviderKind::parse("ollama-local"),
+            Some(ProviderKind::Ollama)
+        );
         assert_eq!(ProviderKind::parse("unknown"), None);
     }
 

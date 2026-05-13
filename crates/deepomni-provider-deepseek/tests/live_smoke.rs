@@ -37,7 +37,10 @@ async fn test_live_deepseek_stream_text() {
     while let Some(delta) = futures::StreamExt::next(&mut stream).await {
         match delta.expect("delta should be ok") {
             ModelDelta::Text(t) => text_deltas.push(t),
-            ModelDelta::End => { saw_end = true; break; }
+            ModelDelta::End => {
+                saw_end = true;
+                break;
+            }
             _ => {}
         }
     }

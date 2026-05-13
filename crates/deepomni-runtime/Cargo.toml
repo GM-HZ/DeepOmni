@@ -30,7 +30,12 @@ deepomni-skills = { path = "../deepomni-skills" }
 deepomni-plugin = { path = "../deepomni-plugin" }
 deepomni-hooks = { path = "../deepomni-hooks" }
 deepomni-prompt = { path = "../deepomni-prompt" }
+deepomni-engine = { path = "../deepomni-engine" }
 deepomni-state = { path = "../deepomni-state" }
+deepomni-trace = { path = "../deepomni-trace" }
 
 [dev-dependencies]
+deepomni-context = { path = "../deepomni-context" }
 deepomni-test-support = { path = "../deepomni-test-support" }
+deepomni-engine = { path = "../deepomni-engine" }
+deepomni-trace = { path = "../deepomni-trace" }

@@ -158,9 +158,7 @@ impl PluginManager {
                         let summary = self.build_summary(&plugin);
                         self.snapshot.push(summary);
                         self.plugins.insert(plugin_id.clone(), plugin);
-                        outcomes.push(PluginLoadOutcome::Loaded(
-                            self.plugins[&plugin_id].clone(),
-                        ));
+                        outcomes.push(PluginLoadOutcome::Loaded(self.plugins[&plugin_id].clone()));
                     }
                     other => outcomes.push(other),
                 }
@@ -170,18 +168,14 @@ impl PluginManager {
         outcomes
     }
 
-    fn load_plugin(
-        &mut self,
-        manifest_path: &Path,
-        plugin_dir: &Path,
-    ) -> PluginLoadOutcome {
+    fn load_plugin(&mut self, manifest_path: &Path, plugin_dir: &Path) -> PluginLoadOutcome {
         let raw = match fs::read_to_string(manifest_path) {
             Ok(r) => r,
             Err(e) => {
                 return PluginLoadOutcome::InvalidManifest {
                     path: manifest_path.to_path_buf(),
                     error: e.to_string(),
-                }
+                };
             }
         };
 
@@ -191,7 +185,7 @@ impl PluginManager {
                 return PluginLoadOutcome::InvalidManifest {
                     path: manifest_path.to_path_buf(),
                     error: e.to_string(),
-                }
+                };
             }
         };
 
@@ -274,10 +268,7 @@ impl PluginManager {
 
     /// List enabled plugins.
     pub fn list_enabled(&self) -> Vec<&LoadedPlugin> {
-        self.plugins
-            .values()
-            .filter(|p| p.enabled)
-            .collect()
+        self.plugins.values().filter(|p| p.enabled).collect()
     }
 
     /// Get paths for active plugin skills.
@@ -388,6 +379,9 @@ mod tests {
 
         let outcomes = PluginManager::new(vec![dir]).discover();
         assert_eq!(outcomes.len(), 1);
-        assert!(matches!(outcomes[0], PluginLoadOutcome::InvalidManifest { .. }));
+        assert!(matches!(
+            outcomes[0],
+            PluginLoadOutcome::InvalidManifest { .. }
+        ));
     }
 }

@@ -14,16 +14,20 @@ use std::time::{Duration, Instant};
 
 use tracing::info;
 
-use deepomni_context::{assemble_context, ContextFragment, ContextManager, FragmentRole, TokenBudget};
+use deepomni_context::{ContextFragment, ContextManager, TokenBudget, assemble_context};
+use deepomni_engine::{AgentControl, Mailbox};
 use deepomni_journal::{JournalEntry, TurnJournal};
 use deepomni_model_provider::{
-    MessageRole, ModelDelta, ModelMessage, ModelProvider, ModelRequest,
-    ModelToolCall, ReasoningReplay,
+    MessageRole, ModelDelta, ModelMessage, ModelProvider, ModelRequest, ModelToolCall,
+    ReasoningReplay,
 };
 use deepomni_policy::{AgentMode, PermissionProfile, PolicyEngine};
 use deepomni_protocol::EventFrame;
 use deepomni_protocol::id::{MessageId, SubagentId, ThreadId, ToolCallId, TurnId};
-use deepomni_tools::{ApprovalStore, ToolInvocation, ToolRegistry};
+use deepomni_tools::{
+    ApprovalStore, PendingToolCall, ToolCallResult, ToolCallRuntime, ToolRegistry, ToolRouter,
+};
+use deepomni_trace::TraceWriter;
 
 /// Per-turn configuration.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -179,116 +183,8 @@ pub struct ResumeTurnRequest {
     pub item_sink: Option<Arc<dyn Fn(deepomni_protocol::TurnItem) + Send + Sync>>,
 }
 
-/// Compiles model request messages for explicit turn paths.
-pub struct RequestCompiler;
-
-impl RequestCompiler {
-    pub fn new() -> Self {
-        Self
-    }
-
-    /// New turn: [system] + [context_fragments] + [history] + [user_input].
-    pub fn compile_new_turn(
-        &self,
-        config: &TurnConfig,
-        fragments: &[ContextFragment],
-        history: &[ModelMessage],
-        user_input: &str,
-    ) -> Vec<ModelMessage> {
-        let mut messages = self.compile_context_prefix(config, fragments);
-        messages.extend_from_slice(history);
-        messages.push(ModelMessage {
-            role: MessageRole::User,
-            content: Some(user_input.to_string()),
-            tool_calls: vec![],
-            tool_call_id: None,
-            reasoning_content: None,
-        });
-        messages
-    }
-
-    /// Tool continuation: [system] + [context] + [transcript].
-    pub fn compile_tool_continuation(
-        &self,
-        config: &TurnConfig,
-        fragments: &[ContextFragment],
-        transcript: &[ModelMessage],
-    ) -> Vec<ModelMessage> {
-        let mut messages = self.compile_context_prefix(config, fragments);
-        messages.extend_from_slice(transcript);
-        messages
-    }
-
-    fn compile_context_prefix(
-        &self,
-        config: &TurnConfig,
-        fragments: &[ContextFragment],
-    ) -> Vec<ModelMessage> {
-        let mut messages = Vec::new();
-
-        let system_content = fragments
-            .iter()
-            .find_map(|f| match f {
-                ContextFragment::System { content } => Some(content.clone()),
-                _ => None,
-            })
-            .or_else(|| config.system_prompt.clone());
-
-        if let Some(sys) = system_content {
-            messages.push(ModelMessage {
-                role: MessageRole::System,
-                content: Some(sys),
-                tool_calls: vec![],
-                tool_call_id: None,
-                reasoning_content: None,
-            });
-        }
-
-        for fragment in fragments.iter() {
-            match fragment {
-                ContextFragment::ConversationMessage { role, content, .. } => {
-                    messages.push(ModelMessage {
-                        role: match role.as_str() {
-                            "user" => MessageRole::User,
-                            "assistant" => MessageRole::Assistant,
-                            _ => MessageRole::User,
-                        },
-                        content: Some(content.clone()),
-                        tool_calls: vec![],
-                        tool_call_id: None,
-                        reasoning_content: None,
-                    });
-                }
-                f if f.role() == FragmentRole::Developer => {
-                    let tag = f.marker_tag().unwrap_or("context");
-                    let content = match f {
-                        ContextFragment::ToolSchemas { content }
-                        | ContextFragment::SkillInstruction { content, .. }
-                        | ContextFragment::PluginCapability { content, .. }
-                        | ContextFragment::Environment { content } => content.clone(),
-                        _ => continue,
-                    };
-                    messages.push(ModelMessage {
-                        role: MessageRole::User,
-                        content: Some(format!("<{tag}>\n{content}\n</{tag}>")),
-                        tool_calls: vec![],
-                        tool_call_id: None,
-                        reasoning_content: None,
-                    });
-                }
-                _ => {}
-            }
-        }
-
-        messages
-    }
-}
-
-impl Default for RequestCompiler {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Phase E: RequestCompiler unified into deepomni-engine crate.
+// Agent now uses deepomni_engine::RequestCompiler directly.
 
 /// The core turn runner.
 ///
@@ -300,6 +196,10 @@ pub struct TurnRunner {
     #[allow(dead_code)]
     policy_engine: Arc<PolicyEngine>,
     journal: Arc<dyn TurnJournal>,
+    tool_router: ToolRouter,
+    tool_call_runtime: ToolCallRuntime,
+    trace_writer: Arc<dyn TraceWriter>,
+    agent_control: Option<Arc<AgentControl>>,
 }
 
 impl TurnRunner {
@@ -307,19 +207,40 @@ impl TurnRunner {
         tool_registry: Arc<ToolRegistry>,
         policy_engine: Arc<PolicyEngine>,
         journal: Arc<dyn TurnJournal>,
+        trace_writer: Arc<dyn TraceWriter>,
     ) -> Self {
-        Self { tool_registry, policy_engine, journal }
+        let tool_router = ToolRouter::new(Vec::new());
+        let tool_call_runtime = ToolCallRuntime::new(tool_registry.clone());
+        Self {
+            tool_registry,
+            policy_engine,
+            journal,
+            tool_router,
+            tool_call_runtime,
+            trace_writer,
+            agent_control: None,
+        }
+    }
+
+    /// Set the agent control for multi-agent spawn support.
+    pub fn with_agent_control(mut self, agent_control: Arc<AgentControl>) -> Self {
+        self.agent_control = Some(agent_control);
+        self
     }
 
     /// Run a single turn: send user input to the model, stream output,
     /// handle tool calls, and return the final result.
-    pub async fn run_turn(
-        &self,
-        request: RunTurnRequest,
-    ) -> Result<TurnResult, TurnError> {
+    pub async fn run_turn(&self, request: RunTurnRequest) -> Result<TurnResult, TurnError> {
         let RunTurnRequest {
-            thread_id, turn_id, user_input, config, provider,
-            conversation_history, reasoning_to_replay, approval_store, item_sink,
+            thread_id,
+            turn_id,
+            user_input,
+            config,
+            provider,
+            conversation_history,
+            reasoning_to_replay,
+            approval_store,
+            item_sink,
         } = request;
 
         // 1. Build tool specs and freeze the turn execution context.
@@ -337,7 +258,8 @@ impl TurnRunner {
         });
 
         // 3. Build context fragments and assemble under token budget.
-        let fragments = Self::build_context_fragments(&config, &user_input, &conversation_history, &tool_specs);
+        let fragments =
+            Self::build_context_fragments(&config, &user_input, &conversation_history, &tool_specs);
         let assembled = assemble_context(turn_id.clone(), fragments, ctx.config.token_budget);
 
         // Emit budget debug metadata.
@@ -352,41 +274,44 @@ impl TurnRunner {
 
         // Emit compaction events if overflow occurred.
         if !assembled.overflow_actions.is_empty() {
-            self.emit(thread_id.clone(), EventFrame::ContextCompactionStarted {
-                turn_id: turn_id.clone(),
-            })
+            self.emit(
+                thread_id.clone(),
+                EventFrame::ContextCompactionStarted {
+                    turn_id: turn_id.clone(),
+                },
+            )
             .await;
-            self.emit(thread_id.clone(), EventFrame::ContextCompactionCompleted {
-                turn_id: turn_id.clone(),
-            })
+            self.emit(
+                thread_id.clone(),
+                EventFrame::ContextCompactionCompleted {
+                    turn_id: turn_id.clone(),
+                },
+            )
             .await;
         }
 
-        // 4. Build initial model request using the assembled context.
-        let request_compiler = RequestCompiler::new();
-        let messages = if conversation_history.is_empty() {
-            request_compiler.compile_new_turn(
-                &config,
-                &assembled.messages,
+        // 4. Build initial model request using engine's unified RequestCompiler (Phase E).
+        let compile_config = deepomni_engine::CompileConfig {
+            system_prompt: config.system_prompt.as_deref(),
+            fragments: &assembled.messages,
+            tools: tool_specs.clone(),
+            max_output_tokens: ctx.config.max_output_tokens,
+            model: ctx.model(),
+            reasoning_to_replay: reasoning_to_replay.clone(),
+        };
+        let compiled = if conversation_history.is_empty() {
+            deepomni_engine::RequestCompiler::compile_new_turn(
+                &compile_config,
                 &conversation_history,
                 &user_input,
             )
         } else {
-            request_compiler.compile_tool_continuation(
-                &config,
-                &assembled.messages,
+            deepomni_engine::RequestCompiler::compile_tool_continuation(
+                &compile_config,
                 &conversation_history,
             )
         };
-        let request = ModelRequest {
-            model: ctx.model().to_string(),
-            messages,
-            tools: tool_specs.clone(),
-            max_output_tokens: ctx.config.max_output_tokens,
-            temperature: None,
-            system_prompt: ctx.config.system_prompt.clone(),
-            replay_reasoning: reasoning_to_replay,
-        };
+        let request = compiled.request;
 
         // 5. Stream from provider in a continuation loop.
         // Maintain an append-only transcript: every iteration appends
@@ -399,12 +324,18 @@ impl TurnRunner {
         let mut pending_tool_calls: Vec<ToolCallState> = Vec::new();
         let mut current_request = request;
         let mut iteration_tool_calls: Vec<ModelToolCall> = Vec::new();
+        // Phase 3: Per-iteration pending call batch for ToolCallRuntime.
+        let mut iteration_pending_calls: Vec<PendingToolCall> = Vec::new();
 
         loop {
             iteration += 1;
             if iteration > MAX_ITERATIONS {
                 break;
             }
+
+            // Phase 4: Trace inference attempt.
+            self.trace_writer
+                .record_inference_attempt(&thread_id, &turn_id, ctx.model());
 
             let mut stream = provider
                 .stream(current_request)
@@ -434,13 +365,20 @@ impl TurnRunner {
                         ctx.record(deepomni_protocol::TurnItem::AssistantDelta {
                             delta: text.clone(),
                         });
-                        self.emit(thread_id.clone(), EventFrame::AssistantMessageDelta {
-                            turn_id: turn_id.clone(),
-                            message_id: message_id.clone(),
-                            delta: text,
-                        }).await;
+                        self.emit(
+                            thread_id.clone(),
+                            EventFrame::AssistantMessageDelta {
+                                turn_id: turn_id.clone(),
+                                message_id: message_id.clone(),
+                                delta: text,
+                            },
+                        )
+                        .await;
                     }
-                    Some(ModelDelta::Reasoning { delta, replay_required }) => {
+                    Some(ModelDelta::Reasoning {
+                        delta,
+                        replay_required,
+                    }) => {
                         if current_reasoning.is_none() {
                             current_reasoning = Some(ReasoningState {
                                 content: String::new(),
@@ -450,13 +388,18 @@ impl TurnRunner {
                         if let Some(ref mut rs) = current_reasoning {
                             rs.content.push_str(&delta);
                         }
-                        self.emit(thread_id.clone(), EventFrame::AssistantReasoningDelta {
-                            turn_id: turn_id.clone(),
-                            message_id: message_id.clone(),
-                            delta,
-                            replay_required,
-                            visibility: deepomni_protocol::event::ReasoningVisibility::HostRenderable,
-                        }).await;
+                        self.emit(
+                            thread_id.clone(),
+                            EventFrame::AssistantReasoningDelta {
+                                turn_id: turn_id.clone(),
+                                message_id: message_id.clone(),
+                                delta,
+                                replay_required,
+                                visibility:
+                                    deepomni_protocol::event::ReasoningVisibility::HostRenderable,
+                            },
+                        )
+                        .await;
                     }
                     Some(ModelDelta::ToolCallStart { call_id, tool_name }) => {
                         active_tool_call = Some(ToolCallState {
@@ -464,24 +407,49 @@ impl TurnRunner {
                             tool_name,
                             arguments: String::new(),
                         });
-                        self.emit(thread_id.clone(), EventFrame::ToolCallStarted {
-                            turn_id: turn_id.clone(),
-                            call_id: ToolCallId::from_string(&call_id),
-                            tool_name: active_tool_call.as_ref().unwrap().tool_name.clone(),
-                        }).await;
+                        let tc_id = ToolCallId::from_string(&call_id);
+                        let tc_name = active_tool_call.as_ref().unwrap().tool_name.clone();
+                        self.emit(
+                            thread_id.clone(),
+                            EventFrame::ToolCallStarted {
+                                turn_id: turn_id.clone(),
+                                call_id: tc_id.clone(),
+                                tool_name: tc_name.clone(),
+                            },
+                        )
+                        .await;
+                        // Write to journal for SSE replay (Plan 2).
+                        let _ = self.journal.append(
+                            &thread_id,
+                            &turn_id,
+                            JournalEntry::ToolCallRequested {
+                                call_id: tc_id,
+                                tool_name: tc_name,
+                                arguments: serde_json::Value::Null,
+                            },
+                        );
                     }
                     Some(ModelDelta::ToolCallArgumentsDelta { call_id, delta }) => {
                         if let Some(ref mut tc) = active_tool_call
-                            && tc.call_id.as_str() == call_id {
-                                tc.arguments.push_str(&delta);
-                            }
-                        self.emit(thread_id.clone(), EventFrame::ToolCallArgumentsDelta {
-                            turn_id: turn_id.clone(),
-                            call_id: ToolCallId::from_string(&call_id),
-                            delta,
-                        }).await;
+                            && tc.call_id.as_str() == call_id
+                        {
+                            tc.arguments.push_str(&delta);
+                        }
+                        self.emit(
+                            thread_id.clone(),
+                            EventFrame::ToolCallArgumentsDelta {
+                                turn_id: turn_id.clone(),
+                                call_id: ToolCallId::from_string(&call_id),
+                                delta,
+                            },
+                        )
+                        .await;
                     }
-                    Some(ModelDelta::ToolCallComplete { call_id: _, tool_name: _, arguments }) => {
+                    Some(ModelDelta::ToolCallComplete {
+                        call_id: _,
+                        tool_name: _,
+                        arguments,
+                    }) => {
                         if let Some(tc) = active_tool_call.take() {
                             had_tool_call_this_iteration = true;
 
@@ -490,84 +458,71 @@ impl TurnRunner {
                                     content: rs.content.clone(),
                                     replay_required: rs.replay_required,
                                 });
-                                self.emit(thread_id.clone(), EventFrame::AssistantReasoningCompleted {
-                                    turn_id: turn_id.clone(),
-                                    message_id: message_id.clone(),
-                                    replay_required: rs.replay_required,
-                                }).await;
+                                self.emit(
+                                    thread_id.clone(),
+                                    EventFrame::AssistantReasoningCompleted {
+                                        turn_id: turn_id.clone(),
+                                        message_id: message_id.clone(),
+                                        replay_required: rs.replay_required,
+                                    },
+                                )
+                                .await;
                             }
 
+                            // Phase 3: Build PendingToolCall via ToolRouter and collect for batch execution.
+                            let pending = self.tool_router.build_pending_call(
+                                &self.tool_registry,
+                                tc.call_id.clone(),
+                                &tc.tool_name,
+                                arguments.clone(),
+                            );
+                            pending_tool_calls.push(tc.clone());
+                            iteration_tool_calls.push(ModelToolCall {
+                                call_id: tc.call_id.to_string(),
+                                tool_name: tc.tool_name.clone(),
+                                arguments: serde_json::from_str(&tc.arguments).unwrap_or_default(),
+                            });
+                            ctx.record(deepomni_protocol::TurnItem::ToolCall {
+                                call_id: tc.call_id.clone(),
+                                tool_name: tc.tool_name.clone(),
+                                arguments: arguments.clone(),
+                            });
+
+                            // Pre-flight approval check for this call.
                             let approval_key = serde_json::json!({
                                 "tool_name": tc.tool_name.clone(),
                                 "arguments": arguments.clone(),
                             });
-                            let decision = self.tool_registry.get(&tc.tool_name)
-                                .map(|h| {
-                                    if let Some(store) = approval_store.as_ref() {
-                                        deepomni_tools::ToolOrchestrator::evaluate_with_cache(
-                                            h.as_ref(),
-                                            &ctx.config.agent_mode,
-                                            store,
-                                            &approval_key,
-                                        )
-                                    } else {
-                                        deepomni_tools::ToolOrchestrator::evaluate(
-                                            h.as_ref(),
-                                            &ctx.config.agent_mode,
-                                        )
-                                    }
-                                })
-                                .unwrap_or(deepomni_tools::OrchestratorDecision::Forbidden {
+                            let handler = self.tool_registry.get(&tc.tool_name);
+                            let decision = if let Some(h) = handler {
+                                if let Some(store) = approval_store.as_ref() {
+                                    deepomni_tools::ToolOrchestrator::evaluate_with_cache(
+                                        h.as_ref(),
+                                        &ctx.config.agent_mode,
+                                        store,
+                                        &approval_key,
+                                    )
+                                } else {
+                                    deepomni_tools::ToolOrchestrator::evaluate(
+                                        h.as_ref(),
+                                        &ctx.config.agent_mode,
+                                    )
+                                }
+                            } else {
+                                deepomni_tools::OrchestratorDecision::Forbidden {
                                     reason: format!("unknown tool: {}", tc.tool_name),
-                                });
+                                }
+                            };
 
                             match decision {
                                 deepomni_tools::OrchestratorDecision::Proceed { .. } => {
-                                    let result = self.execute_tool(&tc, &arguments, &ctx).await?;
-                                    ctx.record(deepomni_protocol::TurnItem::ToolCall {
-                                        call_id: tc.call_id.clone(),
-                                        tool_name: tc.tool_name.clone(),
-                                        arguments: arguments.clone(),
-                                    });
-                                    ctx.record(deepomni_protocol::TurnItem::ToolResult {
-                                        call_id: tc.call_id.clone(),
-                                        tool_name: tc.tool_name.clone(),
-                                        output_preview: result.preview.clone(),
-                                        success: result.success,
-                                    });
-                                    self.emit(thread_id.clone(), EventFrame::ToolCallCompleted {
-                                        turn_id: turn_id.clone(),
-                                        call_id: tc.call_id.clone(),
-                                        success: result.success,
-                                        output_preview: result.preview.clone(),
-                                    }).await;
-
-                                    iteration_tool_results.push(ModelMessage {
-                                        role: MessageRole::Tool,
-                                        content: Some(result.content.clone()),
-                                        tool_calls: vec![],
-                                        tool_call_id: Some(tc.call_id.to_string()),
-                                        reasoning_content: None,
-                                    });
-
-                                    pending_tool_calls.push(ToolCallState {
-                                        call_id: tc.call_id.clone(),
-                                        tool_name: tc.tool_name.clone(),
-                                        arguments: tc.arguments.clone(),
-                                    });
-                                    iteration_tool_calls.push(ModelToolCall {
-                                        call_id: tc.call_id.to_string(),
-                                        tool_name: tc.tool_name.clone(),
-                                        arguments: serde_json::from_str(&tc.arguments).unwrap_or_default(),
-                                    });
+                                    // Phase 3: Collect for batch execution via ToolCallRuntime.
+                                    iteration_pending_calls.push(pending);
                                 }
-                                deepomni_tools::OrchestratorDecision::NeedsApproval { reason, approval_id } => {
-                                    // Persist the pending tool call as a turn item before pausing.
-                                    ctx.record(deepomni_protocol::TurnItem::ToolCall {
-                                        call_id: tc.call_id.clone(),
-                                        tool_name: tc.tool_name.clone(),
-                                        arguments: arguments.clone(),
-                                    });
+                                deepomni_tools::OrchestratorDecision::NeedsApproval {
+                                    reason,
+                                    approval_id,
+                                } => {
                                     let _ = self.journal.append(
                                         &thread_id,
                                         &turn_id,
@@ -579,7 +534,8 @@ impl TurnRunner {
                                             reason: reason.clone(),
                                             model: ctx.config.model.clone(),
                                             workspace: ctx.config.workspace.clone(),
-                                            config_json: serde_json::to_string(&ctx.config).unwrap_or_default(),
+                                            config_json: serde_json::to_string(&ctx.config)
+                                                .unwrap_or_default(),
                                         },
                                     );
                                     return Ok(TurnResult::NeedsApproval {
@@ -591,11 +547,15 @@ impl TurnRunner {
                                     });
                                 }
                                 deepomni_tools::OrchestratorDecision::Forbidden { reason } => {
-                                    self.emit(thread_id.clone(), EventFrame::ToolCallFailed {
-                                        turn_id: turn_id.clone(),
-                                        call_id: tc.call_id.clone(),
-                                        error: reason,
-                                    }).await;
+                                    self.emit(
+                                        thread_id.clone(),
+                                        EventFrame::ToolCallFailed {
+                                            turn_id: turn_id.clone(),
+                                            call_id: tc.call_id.clone(),
+                                            error: reason,
+                                        },
+                                    )
+                                    .await;
                                 }
                             }
                         }
@@ -603,47 +563,163 @@ impl TurnRunner {
                 }
             }
 
-            // After stream ends, if tools were executed this iteration,
-            // append to transcript and continue.
-            if had_tool_call_this_iteration && !iteration_tool_results.is_empty() {
-                // Append exactly this round's assistant tool_calls + matching tool results.
-                let assistant_tool_calls = std::mem::take(&mut iteration_tool_calls);
-                transcript.push(ModelMessage {
-                    role: MessageRole::Assistant,
-                    content: if final_answer.is_empty() { None } else { Some(final_answer.clone()) },
-                    tool_calls: assistant_tool_calls,
-                    tool_call_id: None,
-                    reasoning_content: current_reasoning.as_ref().map(|r| r.content.clone()),
-                });
-                transcript.extend(std::mem::take(&mut iteration_tool_results));
+            // Record provider usage after stream ends (Plan 3 Task 3).
+            // Note: current_request was already consumed by stream(), so we estimate from transcript.
+            let prompt_estimate: u64 = transcript
+                .iter()
+                .map(|m| m.content.as_deref().unwrap_or("").len() as u64 / 4)
+                .sum();
+            let _ = self.journal.append(
+                &thread_id,
+                &turn_id,
+                JournalEntry::ProviderUsage {
+                    prompt_tokens: prompt_estimate,
+                    completion_tokens: final_answer.len() as u64 / 4,
+                },
+            );
 
-                let reasoning_replay = current_reasoning.take().map(|r| {
-                    vec![ReasoningReplay {
-                        message_id: message_id.clone(),
-                        reasoning_content: r.content,
-                    }]
-                });
+            // After stream ends, execute collected tool calls in batch via ToolCallRuntime (Phase 3).
+            if had_tool_call_this_iteration {
+                let batch = std::mem::take(&mut iteration_pending_calls);
+                if !batch.is_empty() {
+                    // Phase 4: Trace tool dispatch for each tool in the batch.
+                    for call in &batch {
+                        self.trace_writer.record_tool_dispatch(
+                            &thread_id,
+                            &turn_id,
+                            &call.invocation.tool_name,
+                        );
+                    }
 
-                current_request = ModelRequest {
-                    model: ctx.model().to_string(),
-                    messages: transcript.clone(),
-                    tools: tool_specs.clone(),
-                    max_output_tokens: ctx.config.max_output_tokens,
-                    temperature: None,
-                    system_prompt: None,
-                    replay_reasoning: reasoning_replay,
-                };
+                    let results: Vec<ToolCallResult> =
+                        self.tool_call_runtime.execute_batch(batch).await;
+
+                    for result in &results {
+                        let (success, preview) = match &result.output {
+                            Ok(o) => match o {
+                                deepomni_protocol::tool::ToolOutput::Function { body, success } => {
+                                    (
+                                        *success,
+                                        body.as_ref().map(|b| b.to_string()).unwrap_or_default(),
+                                    )
+                                }
+                                deepomni_protocol::tool::ToolOutput::Mcp { result: v } => {
+                                    (true, v.to_string())
+                                }
+                            },
+                            Err(_) => (false, String::new()),
+                        };
+                        ctx.record(deepomni_protocol::TurnItem::ToolResult {
+                            call_id: result.call_id.clone(),
+                            tool_name: result.tool_name.clone(),
+                            output_preview: Some(preview.clone()),
+                            success,
+                        });
+                        self.emit(
+                            thread_id.clone(),
+                            EventFrame::ToolCallCompleted {
+                                turn_id: turn_id.clone(),
+                                call_id: result.call_id.clone(),
+                                tool_name: result.tool_name.clone(),
+                                success,
+                                output_preview: Some(preview.clone()),
+                            },
+                        )
+                        .await;
+                        // Write to journal for SSE replay (Plan 2).
+                        if success {
+                            let _ = self.journal.append(
+                                &thread_id,
+                                &turn_id,
+                                JournalEntry::ToolCallCompleted {
+                                    call_id: result.call_id.clone(),
+                                    tool_name: result.tool_name.clone(),
+                                    success: true,
+                                    output: Some(preview.clone()),
+                                    output_preview: Some(preview.clone()),
+                                },
+                            );
+                        } else {
+                            let _ = self.journal.append(
+                                &thread_id,
+                                &turn_id,
+                                JournalEntry::ToolCallFailed {
+                                    call_id: result.call_id.clone(),
+                                    error: preview.clone(),
+                                },
+                            );
+                        }
+
+                        iteration_tool_results.push(ModelMessage {
+                            role: MessageRole::Tool,
+                            content: Some(if preview.is_empty() {
+                                "tool executed".into()
+                            } else {
+                                preview
+                            }),
+                            tool_calls: vec![],
+                            tool_call_id: Some(result.call_id.to_string()),
+                            reasoning_content: None,
+                        });
+                    }
+
+                    // Only continue if we have tool results to feed back.
+                    if !iteration_tool_results.is_empty() {
+                        let assistant_tool_calls = std::mem::take(&mut iteration_tool_calls);
+                        transcript.push(ModelMessage {
+                            role: MessageRole::Assistant,
+                            content: if final_answer.is_empty() {
+                                None
+                            } else {
+                                Some(final_answer.clone())
+                            },
+                            tool_calls: assistant_tool_calls,
+                            tool_call_id: None,
+                            reasoning_content: current_reasoning
+                                .as_ref()
+                                .map(|r| r.content.clone()),
+                        });
+                        transcript.extend(std::mem::take(&mut iteration_tool_results));
+
+                        let reasoning_replay = current_reasoning.take().map(|r| {
+                            vec![ReasoningReplay {
+                                message_id: message_id.clone(),
+                                reasoning_content: r.content,
+                            }]
+                        });
+
+                        current_request = ModelRequest {
+                            model: ctx.model().to_string(),
+                            messages: transcript.clone(),
+                            tools: tool_specs.clone(),
+                            max_output_tokens: ctx.config.max_output_tokens,
+                            temperature: None,
+                            system_prompt: None,
+                            replay_reasoning: reasoning_replay,
+                        };
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
             } else {
                 break;
             }
         }
 
         // 6. Complete the turn.
+        self.trace_writer
+            .record_turn_completed(&thread_id, &turn_id);
+
         if !final_answer.is_empty() {
-            self.emit(thread_id.clone(), EventFrame::AssistantMessageCompleted {
-                turn_id: turn_id.clone(),
-                message_id,
-            })
+            self.emit(
+                thread_id.clone(),
+                EventFrame::AssistantMessageCompleted {
+                    turn_id: turn_id.clone(),
+                    message_id,
+                },
+            )
             .await;
         }
 
@@ -666,9 +742,17 @@ impl TurnRunner {
         request: ResumeTurnRequest,
     ) -> Result<TurnResult, TurnError> {
         let ResumeTurnRequest {
-            thread_id, turn_id, call_id, tool_name, arguments,
-            config, provider, tool_result_content: _, transcript,
-            reasoning_to_replay, item_sink,
+            thread_id,
+            turn_id,
+            call_id,
+            tool_name,
+            arguments,
+            config,
+            provider,
+            tool_result_content: _,
+            transcript,
+            reasoning_to_replay,
+            item_sink,
         } = request;
 
         // Clone item_sink before moving into ctx; we need it for the run_turn call later.
@@ -686,44 +770,80 @@ impl TurnRunner {
         };
 
         // Emit approval.
-        self.emit(thread_id.clone(), EventFrame::ToolCallApproved {
-            turn_id: turn_id.clone(),
-            call_id: call_id.clone(),
-        })
+        self.emit(
+            thread_id.clone(),
+            EventFrame::ToolCallApproved {
+                turn_id: turn_id.clone(),
+                call_id: call_id.clone(),
+            },
+        )
         .await;
 
-        // Execute the approved tool.
-        let tc = ToolCallState {
-            call_id: call_id.clone(),
-            tool_name: tool_name.clone(),
-            arguments: serde_json::to_string(&arguments).unwrap_or_default(),
+        // Phase 3: Execute the approved tool through ToolRouter + ToolCallRuntime.
+        let pending = self.tool_router.build_pending_call(
+            &self.tool_registry,
+            call_id.clone(),
+            &tool_name,
+            arguments.clone(),
+        );
+        let batch_results = self.tool_call_runtime.execute_batch(vec![pending]).await;
+        let result = batch_results
+            .into_iter()
+            .next()
+            .ok_or_else(|| TurnError::ProviderError("tool execution produced no result".into()))?;
+
+        let (success, preview, content) = match &result.output {
+            Ok(o) => {
+                let p = tool_output_preview(o);
+                let c = p.clone();
+                (true, Some(p), c)
+            }
+            Err(e) => (false, Some(format!("error: {e}")), format!("{e}")),
         };
-        let result = self.execute_tool(&tc, &arguments, &ctx).await?;
 
         ctx.record(deepomni_protocol::TurnItem::ToolResult {
             call_id: call_id.clone(),
             tool_name: tool_name.clone(),
-            output_preview: result.preview.clone(),
-            success: result.success,
+            output_preview: preview.clone(),
+            success,
         });
         ctx.record(deepomni_protocol::TurnItem::ApprovalDecision {
             call_id: call_id.clone(),
             approved: true,
         });
 
-        self.emit(thread_id.clone(), EventFrame::ToolCallCompleted {
-            turn_id: turn_id.clone(),
-            call_id: call_id.clone(),
-            success: result.success,
-            output_preview: result.preview.clone(),
-        })
+        self.emit(
+            thread_id.clone(),
+            EventFrame::ToolCallCompleted {
+                turn_id: turn_id.clone(),
+                call_id: call_id.clone(),
+                tool_name: tool_name.clone(),
+                success,
+                output_preview: preview.clone(),
+            },
+        )
         .await;
+
+        // Write to journal for SSE replay.
+        if success {
+            let _ = self.journal.append(
+                &thread_id,
+                &turn_id,
+                JournalEntry::ToolCallCompleted {
+                    call_id: call_id.clone(),
+                    tool_name: tool_name.clone(),
+                    success: true,
+                    output: preview.clone(),
+                    output_preview: preview.clone(),
+                },
+            );
+        }
 
         // Continue with the full transcript + tool result, not a fake user input.
         let mut continuation_transcript = transcript;
         continuation_transcript.push(ModelMessage {
             role: MessageRole::Tool,
-            content: Some(result.content.clone()),
+            content: Some(content),
             tool_calls: vec![],
             tool_call_id: Some(call_id.to_string()),
             reasoning_content: None,
@@ -741,46 +861,6 @@ impl TurnRunner {
             item_sink: item_sink_for_continuation,
         })
         .await
-    }
-
-    /// Execute a tool and return the result.
-    async fn execute_tool(
-        &self,
-        tc: &ToolCallState,
-        arguments: &serde_json::Value,
-        ctx: &TurnExecutionContext,
-    ) -> Result<ToolExecutionResult, TurnError> {
-        let handler = self.tool_registry.get(&tc.tool_name).ok_or_else(|| {
-            TurnError::UnknownTool(tc.tool_name.clone())
-        })?;
-
-        let is_mutating = handler.is_mutating();
-        let invocation = ToolInvocation {
-            call_id: tc.call_id.clone(),
-            tool_name: tc.tool_name.clone(),
-            payload: deepomni_protocol::tool::ToolPayload::Function {
-                arguments: serde_json::to_string(arguments).unwrap_or_default(),
-            },
-            timeout: Some(Duration::from_secs(60)),
-            allow_mutating: is_mutating,
-            workspace: Some(ctx.workspace().to_string()),
-        };
-
-        match self.tool_registry.dispatch(invocation).await {
-            Ok(output) => {
-                let preview = tool_output_preview(&output);
-                Ok(ToolExecutionResult {
-                    success: true,
-                    content: preview.clone(),
-                    preview: Some(preview),
-                })
-            }
-            Err(e) => Ok(ToolExecutionResult {
-                success: false,
-                content: format!("{e}"),
-                preview: Some(format!("error: {e}")),
-            }),
-        }
     }
 
     /// Emit an event through the event bus. Seq is assigned by the
@@ -834,12 +914,38 @@ impl TurnRunner {
         let child_thread_id = ThreadId::new();
         let child_turn_id = TurnId::new();
 
-        self.emit(parent_thread_id.clone(), EventFrame::SubagentSpawned {
-            parent_turn_id: parent_turn_id.clone(),
-            subagent_id: subagent_id.clone(),
-            task: task.clone(),
-        })
+        // Phase 5: Register child with AgentControl if available.
+        let (mailbox, _receiver) = Mailbox::new();
+        if let Some(ref ctrl) = self.agent_control
+            && !ctrl.can_spawn(0)
+        {
+            return Err(TurnError::ProviderError("agent spawn limit reached".into()));
+        }
+
+        self.emit(
+            parent_thread_id.clone(),
+            EventFrame::SubagentSpawned {
+                parent_turn_id: parent_turn_id.clone(),
+                subagent_id: subagent_id.clone(),
+                task: task.clone(),
+            },
+        )
         .await;
+
+        // Write journal entry for SSE replay (Plan 4).
+        let _ = self.journal.append(
+            &parent_thread_id,
+            &parent_turn_id,
+            JournalEntry::SubagentSpawned {
+                parent_turn_id: parent_turn_id.clone(),
+                subagent_id: subagent_id.clone(),
+                task: task.clone(),
+            },
+        );
+
+        // Trace agent spawn.
+        self.trace_writer
+            .record_agent_spawn(&parent_thread_id, &child_thread_id);
 
         info!(
             subagent_id = %subagent_id,
@@ -862,38 +968,87 @@ impl TurnRunner {
             })
             .await;
 
+        // Phase 5: Send result to parent via mailbox.
         match result {
             Ok(TurnResult::Completed { answer, .. }) => {
-                self.emit(parent_thread_id, EventFrame::SubagentCompleted {
-                    parent_turn_id,
-                    subagent_id: subagent_id.clone(),
-                    result_summary: answer.clone(),
-                })
+                let _ = mailbox.send(deepomni_protocol::agent::InterAgentMessage {
+                    author: deepomni_protocol::agent::AgentPath::from_string(format!(
+                        "/root/{}",
+                        subagent_id
+                    )),
+                    recipient: deepomni_protocol::agent::AgentPath::root(),
+                    other_recipients: vec![],
+                    content: answer.clone(),
+                    trigger_turn: true,
+                });
+                self.emit(
+                    parent_thread_id.clone(),
+                    EventFrame::SubagentCompleted {
+                        parent_turn_id: parent_turn_id.clone(),
+                        subagent_id: subagent_id.clone(),
+                        result_summary: answer.clone(),
+                    },
+                )
                 .await;
+                let _ = self.journal.append(
+                    &parent_thread_id,
+                    &parent_turn_id,
+                    JournalEntry::SubagentCompleted {
+                        parent_turn_id: parent_turn_id.clone(),
+                        subagent_id: subagent_id.clone(),
+                        result_summary: answer.clone(),
+                    },
+                );
                 Ok(SubagentResult {
                     subagent_id,
                     answer,
                 })
             }
             Ok(other) => {
-                self.emit(parent_thread_id, EventFrame::SubagentFailed {
-                    parent_turn_id,
-                    subagent_id: subagent_id.clone(),
-                    error: format!("unexpected turn result: {other:?}"),
-                })
+                let err_msg = format!("unexpected turn result: {other:?}");
+                self.emit(
+                    parent_thread_id.clone(),
+                    EventFrame::SubagentFailed {
+                        parent_turn_id: parent_turn_id.clone(),
+                        subagent_id: subagent_id.clone(),
+                        error: err_msg.clone(),
+                    },
+                )
                 .await;
+                let _ = self.journal.append(
+                    &parent_thread_id,
+                    &parent_turn_id,
+                    JournalEntry::SubagentFailed {
+                        parent_turn_id: parent_turn_id.clone(),
+                        subagent_id: subagent_id.clone(),
+                        error: err_msg,
+                    },
+                );
                 Ok(SubagentResult {
                     subagent_id,
                     answer: "sub-agent did not complete normally".into(),
                 })
             }
             Err(e) => {
-                self.emit(parent_thread_id, EventFrame::SubagentFailed {
-                    parent_turn_id,
-                    subagent_id: subagent_id.clone(),
-                    error: format!("{e}"),
-                })
+                let err_msg = format!("{e}");
+                self.emit(
+                    parent_thread_id.clone(),
+                    EventFrame::SubagentFailed {
+                        parent_turn_id: parent_turn_id.clone(),
+                        subagent_id: subagent_id.clone(),
+                        error: err_msg.clone(),
+                    },
+                )
                 .await;
+                let _ = self.journal.append(
+                    &parent_thread_id,
+                    &parent_turn_id,
+                    JournalEntry::SubagentFailed {
+                        parent_turn_id: parent_turn_id.clone(),
+                        subagent_id: subagent_id.clone(),
+                        error: err_msg,
+                    },
+                );
                 Err(e)
             }
         }
@@ -913,13 +1068,6 @@ struct ToolCallState {
 struct ReasoningState {
     content: String,
     replay_required: bool,
-}
-
-#[derive(Debug)]
-struct ToolExecutionResult {
-    success: bool,
-    content: String,
-    preview: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -978,20 +1126,46 @@ impl std::fmt::Display for TurnError {
 impl std::error::Error for TurnError {}
 
 /// Extract a preview string from a tool output.
+/// Normalize a conversation transcript: ensure every tool call has its result,
+/// and remove orphan tool results (results without a matching call).
+/// This prevents API errors when compaction drops items asymmetrically.
+pub fn normalize_transcript(messages: &mut Vec<ModelMessage>) {
+    // Collect all known call_ids from assistant tool_calls.
+    let known_calls: std::collections::HashSet<String> = messages
+        .iter()
+        .filter(|m| m.role == MessageRole::Assistant)
+        .flat_map(|m| m.tool_calls.iter().map(|tc| tc.call_id.clone()))
+        .collect();
+
+    // Remove orphan tool results (no matching call).
+    messages.retain(|m| {
+        if m.role != MessageRole::Tool {
+            return true;
+        }
+        if let Some(ref cid) = m.tool_call_id {
+            known_calls.contains(cid)
+        } else {
+            false
+        }
+    });
+
+    // For assistant messages with tool_calls but no matching results,
+    // this is acceptable — the model may not have executed those tools yet.
+}
+
 fn tool_output_preview(output: &deepomni_protocol::tool::ToolOutput) -> String {
     match output {
-        deepomni_protocol::tool::ToolOutput::Function { body, .. } => {
-            body.as_ref()
-                .map(|v| {
-                    let s = serde_json::to_string(v).unwrap_or_default();
-                    if s.len() > 200 {
-                        format!("{}...", &s[..200])
-                    } else {
-                        s
-                    }
-                })
-                .unwrap_or_else(|| "ok".into())
-        }
+        deepomni_protocol::tool::ToolOutput::Function { body, .. } => body
+            .as_ref()
+            .map(|v| {
+                let s = serde_json::to_string(v).unwrap_or_default();
+                if s.len() > 200 {
+                    format!("{}...", &s[..200])
+                } else {
+                    s
+                }
+            })
+            .unwrap_or_else(|| "ok".into()),
         deepomni_protocol::tool::ToolOutput::Mcp { result } => {
             let s = serde_json::to_string(result).unwrap_or_default();
             if s.len() > 200 {
@@ -1005,7 +1179,11 @@ fn tool_output_preview(output: &deepomni_protocol::tool::ToolOutput) -> String {
 
 fn event_frame_to_journal_entry(event: &EventFrame) -> Option<(TurnId, JournalEntry)> {
     match event {
-        EventFrame::TurnStarted { turn_id, user_input, .. } => Some((
+        EventFrame::TurnStarted {
+            turn_id,
+            user_input,
+            ..
+        } => Some((
             turn_id.clone(),
             JournalEntry::TurnStarted {
                 user_input: user_input.clone(),
@@ -1104,12 +1282,14 @@ fn event_frame_to_journal_entry(event: &EventFrame) -> Option<(TurnId, JournalEn
         EventFrame::ToolCallCompleted {
             turn_id,
             call_id,
+            tool_name: _,
             success,
             output_preview,
         } => Some((
             turn_id.clone(),
             JournalEntry::ToolCallCompleted {
                 call_id: call_id.clone(),
+                tool_name: String::new(),
                 success: *success,
                 output: output_preview.clone(),
                 output_preview: output_preview.clone(),
@@ -1181,17 +1361,19 @@ fn event_frame_to_journal_entry(event: &EventFrame) -> Option<(TurnId, JournalEn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use deepomni_policy::{PermissionProfile, PolicyEngine};
-    use deepomni_tools::{ToolHandler, ToolRegistry};
     use deepomni_journal::InMemoryJournal;
+    use deepomni_policy::{PermissionProfile, PolicyEngine};
     use deepomni_protocol::ToolOutput;
+    use deepomni_tools::{ToolHandler, ToolInvocation, ToolRegistry};
+    use std::sync::Arc;
 
     /// Simple test tool.
     struct TestReadTool;
     #[async_trait::async_trait]
     impl ToolHandler for TestReadTool {
-        fn name(&self) -> &str { "read_file" }
+        fn name(&self) -> &str {
+            "read_file"
+        }
         async fn handle(&self, _: ToolInvocation) -> Result<ToolOutput, deepomni_tools::ToolError> {
             Ok(ToolOutput::Function {
                 body: Some(serde_json::json!({"content": "hello world"})),
@@ -1204,13 +1386,17 @@ mod tests {
     async fn test_turn_runner_construction() {
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(TestReadTool)).await;
-        let policy = Arc::new(PolicyEngine::new(AgentMode::Agent, PermissionProfile::new()));
+        let policy = Arc::new(PolicyEngine::new(
+            AgentMode::Agent,
+            PermissionProfile::new(),
+        ));
         let journal = Arc::new(InMemoryJournal::new());
 
         let runner = TurnRunner::new(
             Arc::new(registry),
             policy,
             journal,
+            Arc::new(deepomni_trace::NoopTraceWriter),
         );
         // Construction succeeded.
         let _ = runner;
@@ -1228,18 +1414,18 @@ mod tests {
 
     #[test]
     fn request_compiler_new_turn_appends_user_input() {
-        let config = TurnConfig {
-            model: "mock-model".into(),
+        use deepomni_engine::{CompileConfig, RequestCompiler};
+        let config = CompileConfig {
+            system_prompt: Some("system"),
+            fragments: &[],
+            tools: vec![],
             max_output_tokens: Some(100),
-            token_budget: 10_000,
-            turn_timeout: None,
-            agent_mode: AgentMode::Agent,
-            system_prompt: Some("system".into()),
-            workspace: "/tmp/test".into(),
+            model: "mock-model",
+            reasoning_to_replay: None,
         };
-        let compiler = RequestCompiler::new();
 
-        let messages = compiler.compile_new_turn(&config, &[], &[], "hello");
+        let compiled = RequestCompiler::compile_new_turn(&config, &[], "hello");
+        let messages = &compiled.request.messages;
 
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, MessageRole::System);
@@ -1249,16 +1435,15 @@ mod tests {
 
     #[test]
     fn request_compiler_tool_continuation_does_not_append_fake_user() {
-        let config = TurnConfig {
-            model: "mock-model".into(),
+        use deepomni_engine::{CompileConfig, RequestCompiler};
+        let config = CompileConfig {
+            system_prompt: Some("system"),
+            fragments: &[],
+            tools: vec![],
             max_output_tokens: Some(100),
-            token_budget: 10_000,
-            turn_timeout: None,
-            agent_mode: AgentMode::Agent,
-            system_prompt: Some("system".into()),
-            workspace: "/tmp/test".into(),
+            model: "mock-model",
+            reasoning_to_replay: None,
         };
-        let compiler = RequestCompiler::new();
         let transcript = vec![ModelMessage {
             role: MessageRole::Tool,
             content: Some("tool output".into()),
@@ -1267,7 +1452,8 @@ mod tests {
             reasoning_content: None,
         }];
 
-        let messages = compiler.compile_tool_continuation(&config, &[], &transcript);
+        let compiled = RequestCompiler::compile_tool_continuation(&config, &transcript);
+        let messages = &compiled.request.messages;
 
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, MessageRole::System);

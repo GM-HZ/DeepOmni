@@ -20,8 +20,12 @@ deepomni-model-provider = { path = "../deepomni-model-provider" }
 deepomni-tools = { path = "../deepomni-tools" }
 deepomni-policy = { path = "../deepomni-policy" }
 deepomni-context = { path = "../deepomni-context" }
+deepomni-engine = { path = "../deepomni-engine" }
+deepomni-trace = { path = "../deepomni-trace" }
 
 [dev-dependencies]
 serde_json = { workspace = true }
 deepomni-protocol = { path = "../deepomni-protocol" }
 deepomni-test-support = { path = "../deepomni-test-support" }
+deepomni-trace = { path = "../deepomni-trace" }
+deepomni-sandbox = { path = "../deepomni-sandbox" }

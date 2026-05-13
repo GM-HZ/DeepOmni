@@ -31,7 +31,10 @@ impl std::fmt::Display for ProtocolError {
                 write!(f, "schema violation: {details}")
             }
             ProtocolError::BackwardCompatibilityViolation { field } => {
-                write!(f, "backward compatibility violation: field '{field}' changed incompatibly")
+                write!(
+                    f,
+                    "backward compatibility violation: field '{field}' changed incompatibly"
+                )
             }
         }
     }

@@ -100,10 +100,7 @@ impl HookDispatcher {
         {
             let mut by_point = self.by_point.write().await;
             for point in &meta.hook_points {
-                by_point
-                    .entry(*point)
-                    .or_default()
-                    .push(hook_id.clone());
+                by_point.entry(*point).or_default().push(hook_id.clone());
             }
         }
 
@@ -141,11 +138,7 @@ impl HookDispatcher {
     ///
     /// Each hook runs with a timeout. Failures in one hook do not
     /// affect other hooks or the agent loop.
-    pub async fn dispatch(
-        &self,
-        point: HookPoint,
-        ctx: HookContext,
-    ) -> Vec<HookOutcome> {
+    pub async fn dispatch(&self, point: HookPoint, ctx: HookContext) -> Vec<HookOutcome> {
         let hook_ids = {
             let by_point = self.by_point.read().await;
             by_point.get(&point).cloned().unwrap_or_default()
@@ -165,11 +158,8 @@ impl HookDispatcher {
             };
             let timeout_ms = handler.metadata().timeout_ms.max(1000);
 
-            match tokio::time::timeout(
-                Duration::from_millis(timeout_ms),
-                handler.run(ctx.clone()),
-            )
-            .await
+            match tokio::time::timeout(Duration::from_millis(timeout_ms), handler.run(ctx.clone()))
+                .await
             {
                 Ok(Ok(outcome)) => outcomes.push(outcome),
                 Ok(Err(e)) => {
@@ -193,11 +183,7 @@ impl HookDispatcher {
     }
 
     /// Convenience: fire hooks and collect any context injections.
-    pub async fn dispatch_and_collect_context(
-        &self,
-        point: HookPoint,
-        ctx: HookContext,
-    ) -> String {
+    pub async fn dispatch_and_collect_context(&self, point: HookPoint, ctx: HookContext) -> String {
         let outcomes = self.dispatch(point, ctx).await;
         let mut injected = String::new();
         for outcome in outcomes {
@@ -228,7 +214,9 @@ pub struct LoggingHook {
 }
 
 impl Default for LoggingHook {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LoggingHook {
@@ -358,22 +346,26 @@ mod tests {
         }
         #[async_trait]
         impl HookHandler for PluginHook {
-            fn metadata(&self) -> &Hook { &self.meta }
+            fn metadata(&self) -> &Hook {
+                &self.meta
+            }
             async fn run(&self, _ctx: HookContext) -> Result<HookOutcome, String> {
                 Ok(HookOutcome::Ok)
             }
         }
 
         let dispatcher = HookDispatcher::new();
-        dispatcher.register(Arc::new(PluginHook {
-            meta: Hook {
-                id: "myplugin.hook".into(),
-                name: "Plugin Hook".into(),
-                hook_points: vec![HookPoint::TurnCompleted],
-                plugin_id: Some("myplugin".into()),
-                timeout_ms: 5000,
-            },
-        })).await;
+        dispatcher
+            .register(Arc::new(PluginHook {
+                meta: Hook {
+                    id: "myplugin.hook".into(),
+                    name: "Plugin Hook".into(),
+                    hook_points: vec![HookPoint::TurnCompleted],
+                    plugin_id: Some("myplugin".into()),
+                    timeout_ms: 5000,
+                },
+            }))
+            .await;
         assert_eq!(dispatcher.hook_count().await, 1);
 
         let removed = dispatcher.remove_plugin_hooks("myplugin").await;

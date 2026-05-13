@@ -128,9 +128,10 @@ impl McpManager {
 
     /// Start a specific MCP server and discover its tools.
     pub async fn start(&mut self, server_name: &str) -> Result<Vec<ToolSpec>, McpError> {
-        let server = self.servers.get_mut(server_name).ok_or_else(|| {
-            McpError::ServerNotFound(server_name.into())
-        })?;
+        let server = self
+            .servers
+            .get_mut(server_name)
+            .ok_or_else(|| McpError::ServerNotFound(server_name.into()))?;
 
         server.status = McpServerStatus::Connecting;
         debug!(server = %server_name, "starting MCP server");
@@ -186,12 +187,11 @@ impl McpManager {
         let list_resp = Self::read_response(&mut stdout_reader)?;
 
         let tools: Vec<ToolSpec> = if let Some(result) = list_resp.result {
-            let tools_result: ListToolsResult = serde_json::from_value(result).map_err(|e| {
-                McpError::Protocol {
+            let tools_result: ListToolsResult =
+                serde_json::from_value(result).map_err(|e| McpError::Protocol {
                     server: server_name.into(),
                     message: format!("failed to parse tools/list: {e}"),
-                }
-            })?;
+                })?;
 
             tools_result
                 .tools
@@ -222,19 +222,14 @@ impl McpManager {
         Ok(tools)
     }
 
-    fn send_request(
-        stdin: &mut dyn Write,
-        request: &JsonRpcRequest,
-    ) -> Result<(), McpError> {
+    fn send_request(stdin: &mut dyn Write, request: &JsonRpcRequest) -> Result<(), McpError> {
         let json = serde_json::to_string(request).unwrap_or_default();
         writeln!(stdin, "{json}").map_err(McpError::Io)?;
         stdin.flush().map_err(McpError::Io)?;
         Ok(())
     }
 
-    fn read_response(
-        stdout: &mut dyn BufRead,
-    ) -> Result<JsonRpcResponse, McpError> {
+    fn read_response(stdout: &mut dyn BufRead) -> Result<JsonRpcResponse, McpError> {
         let mut line = String::new();
         stdout.read_line(&mut line).map_err(McpError::Io)?;
         if line.trim().is_empty() {
@@ -259,10 +254,7 @@ impl McpManager {
     }
 
     /// Register all MCP tools into a ToolRegistry.
-    pub async fn register_all(
-        &mut self,
-        registry: &mut ToolRegistry,
-    ) -> Result<usize, McpError> {
+    pub async fn register_all(&mut self, registry: &mut ToolRegistry) -> Result<usize, McpError> {
         let server_names: Vec<String> = self.servers.keys().cloned().collect();
         let mut total = 0usize;
 
@@ -365,7 +357,10 @@ mod tests {
     fn test_add_server() {
         let mut manager = McpManager::new();
         manager.add_server("test-server", "echo", &["hello".into()]);
-        assert_eq!(manager.server_status("test-server").unwrap(), &McpServerStatus::Disconnected);
+        assert_eq!(
+            manager.server_status("test-server").unwrap(),
+            &McpServerStatus::Disconnected
+        );
     }
 
     #[test]

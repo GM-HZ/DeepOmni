@@ -6,6 +6,31 @@
 //!
 //! Based on Codex sandboxing and PRD §7.10.
 
+/// Sandbox attempt strategy for the ToolCallRuntime.
+/// Controls whether the first attempt is sandboxed and whether
+/// a denied attempt can escalate to unsandboxed retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxAttempt {
+    /// Execute without sandbox.
+    Disabled,
+    /// Execute sandboxed. If denied and escalate_on_deny, retry unsandboxed.
+    Required { escalate_on_deny: bool },
+    /// Prefer sandbox but allow unsandboxed on deny.
+    PreferredWithEscalation,
+}
+
+impl SandboxAttempt {
+    pub fn from_orchestrator_decision(sandbox_required: bool, escalate_on_deny: bool) -> Self {
+        if sandbox_required {
+            SandboxAttempt::Required { escalate_on_deny }
+        } else if escalate_on_deny {
+            SandboxAttempt::PreferredWithEscalation
+        } else {
+            SandboxAttempt::Disabled
+        }
+    }
+}
+
 /// Result of sandbox policy evaluation.
 #[derive(Debug, Clone)]
 pub enum SandboxDecision {

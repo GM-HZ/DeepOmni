@@ -98,7 +98,8 @@ fn test_mcp_manager_add_server() {
 
 #[test]
 fn test_mcp_jsonrpc_error_response() {
-    let error_response = r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32601,"message":"Method not found"}}"#;
+    let error_response =
+        r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32601,"message":"Method not found"}}"#;
     let parsed: serde_json::Value = serde_json::from_str(error_response).unwrap();
     assert!(parsed.get("error").is_some());
     assert_eq!(parsed["error"]["code"], -32601);

@@ -5,13 +5,19 @@
 //!
 //! Based on Codex context fragment patterns.
 
+pub mod compaction;
+pub mod normalize;
+
+pub use compaction::{build_compacted_history, build_compaction_request};
+pub use normalize::normalize_history;
+
 use std::collections::VecDeque;
 
 use sha2::{Digest, Sha256};
 
-use deepomni_model_provider::ModelMessage;
-use deepomni_protocol::id::{MessageId, TurnId};
+use deepomni_model_provider::{MessageRole, ModelMessage};
 use deepomni_protocol::Usage;
+use deepomni_protocol::id::{MessageId, TurnId};
 
 /// Token budget allocation for a turn.
 ///
@@ -40,11 +46,11 @@ impl TokenBudget {
     pub fn new(total: u64) -> Self {
         Self {
             total,
-            system_tokens: total * 10 / 100,   // 10%
-            schema_tokens: total * 10 / 100,   // 10%
-            skill_tokens: total * 10 / 100,    // 10%
-            history_tokens: total * 65 / 100,  // 65%
-            margin_tokens: total * 5 / 100,    // 5%
+            system_tokens: total * 10 / 100,  // 10%
+            schema_tokens: total * 10 / 100,  // 10%
+            skill_tokens: total * 10 / 100,   // 10%
+            history_tokens: total * 65 / 100, // 65%
+            margin_tokens: total * 5 / 100,   // 5%
             consumed: 0,
         }
     }
@@ -137,6 +143,8 @@ pub struct ContextManager {
     history_version: u64,
     token_info: Option<TokenUsageInfo>,
     reference_context: Option<ContextSnapshot>,
+    /// Item count at last API usage snapshot, for incremental token estimation.
+    last_usage_item_count: usize,
 }
 
 impl ContextManager {
@@ -156,8 +164,12 @@ impl ContextManager {
         self.apply_truncation(policy);
     }
 
+    /// Return the current prompt history with normalization applied:
+    /// orphan tool results (no matching assistant tool call) are removed.
     pub fn for_prompt(&self) -> Vec<ModelMessage> {
-        self.items.clone()
+        let mut items = self.items.clone();
+        normalize_history(&mut items);
+        items
     }
 
     pub fn replace_history(&mut self, items: Vec<ModelMessage>) {
@@ -166,12 +178,27 @@ impl ContextManager {
     }
 
     pub fn update_token_info(&mut self, usage: &Usage, context_window: Option<u64>) {
+        self.last_usage_item_count = self.items.len();
         self.token_info = Some(TokenUsageInfo {
             prompt_tokens: usage.prompt_tokens,
             completion_tokens: usage.completion_tokens,
             total_tokens: usage.total(),
             context_window,
         });
+    }
+
+    /// Estimate total tokens including items added after last API usage.
+    fn estimated_local_tokens(&self) -> u64 {
+        let items_after = self.items.len().saturating_sub(self.last_usage_item_count);
+        if items_after == 0 {
+            return 0;
+        }
+        // Rough estimate: 4 chars per token for items after last usage.
+        let text_len: usize = self.items[self.last_usage_item_count..]
+            .iter()
+            .map(|m| m.content.as_deref().unwrap_or("").len())
+            .sum();
+        (text_len as u64).div_ceil(4)
     }
 
     pub fn needs_compaction(&self, threshold: f64) -> bool {
@@ -184,7 +211,10 @@ impl ContextManager {
         if window == 0 {
             return false;
         }
-        (info.total_tokens as f64 / window as f64) >= threshold
+        let estimated = info
+            .total_tokens
+            .saturating_add(self.estimated_local_tokens());
+        (estimated as f64 / window as f64) >= threshold
     }
 
     pub fn snapshot(&self) -> ContextSnapshot {
@@ -213,6 +243,33 @@ impl ContextManager {
 
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// Drop the last N user turns and all following items.
+    /// Returns the number of items removed.
+    pub fn drop_last_n_user_turns(&mut self, n: usize) -> usize {
+        if n == 0 {
+            return 0;
+        }
+        // Find the Nth user message from the end.
+        let mut user_count = 0usize;
+        let mut cut_index = None;
+        for (i, msg) in self.items.iter().enumerate().rev() {
+            if msg.role == MessageRole::User {
+                user_count += 1;
+                if user_count == n {
+                    cut_index = Some(i);
+                    break;
+                }
+            }
+        }
+        let Some(idx) = cut_index else {
+            return 0;
+        };
+        let removed = self.items.len() - idx;
+        self.items.truncate(idx);
+        self.history_version = self.history_version.saturating_add(1);
+        removed
     }
 
     fn apply_truncation(&mut self, policy: TruncationPolicy) {
@@ -246,7 +303,9 @@ fn estimated_messages_tokens(items: &[ModelMessage]) -> u64 {
                 .iter()
                 .map(|call| call.arguments.to_string().len() + call.tool_name.len())
                 .sum::<usize>();
-            ((content + reasoning + tool_calls) as u64).div_ceil(4).max(1)
+            ((content + reasoning + tool_calls) as u64)
+                .div_ceil(4)
+                .max(1)
         })
         .sum()
 }
@@ -313,7 +372,9 @@ mod context_manager_tests {
         assert_eq!(manager.history_version(), 1);
         assert_eq!(manager.reference_context().unwrap().items.len(), 1);
         assert_eq!(
-            manager.reference_context().unwrap().items[0].content.as_deref(),
+            manager.reference_context().unwrap().items[0]
+                .content
+                .as_deref(),
             Some("summary")
         );
     }
@@ -332,6 +393,77 @@ mod context_manager_tests {
 
         assert!(manager.needs_compaction(0.8));
         assert!(!manager.needs_compaction(0.9));
+    }
+
+    #[test]
+    fn for_prompt_removes_orphan_tool_outputs() {
+        use deepomni_model_provider::ModelToolCall;
+        let mut manager = ContextManager::new();
+        // Assistant tool call for call-1.
+        manager.record_items(
+            &[
+                ModelMessage {
+                    role: MessageRole::Assistant,
+                    content: None,
+                    tool_calls: vec![ModelToolCall {
+                        call_id: "call-1".into(),
+                        tool_name: "read".into(),
+                        arguments: serde_json::Value::Null,
+                    }],
+                    tool_call_id: None,
+                    reasoning_content: None,
+                },
+                // Matching tool result.
+                ModelMessage {
+                    role: MessageRole::Tool,
+                    content: Some("result".into()),
+                    tool_calls: vec![],
+                    tool_call_id: Some("call-1".into()),
+                    reasoning_content: None,
+                },
+                // Orphan tool result (no matching call).
+                ModelMessage {
+                    role: MessageRole::Tool,
+                    content: Some("orphan".into()),
+                    tool_calls: vec![],
+                    tool_call_id: Some("call-orphan".into()),
+                    reasoning_content: None,
+                },
+            ],
+            TruncationPolicy::None,
+        );
+
+        let prompt = manager.for_prompt();
+        assert_eq!(prompt.len(), 2, "orphan tool result should be removed");
+        assert!(
+            prompt
+                .iter()
+                .all(|m| m.tool_call_id.as_deref() != Some("call-orphan"))
+        );
+    }
+
+    /// Plan 3 Task 3: Token usage accounts for items added after last API usage.
+    #[test]
+    fn token_usage_includes_local_items_after_last_usage() {
+        let mut manager = ContextManager::new();
+        manager.update_token_info(
+            &Usage {
+                prompt_tokens: 700,
+                completion_tokens: 50,
+                ..Default::default()
+            },
+            Some(1000),
+        );
+        // Add 400 chars ≈ 100 tokens of new local items.
+        manager.record_items(
+            &[message(MessageRole::User, &"x".repeat(400))],
+            TruncationPolicy::None,
+        );
+        // Total: 750 (prompt+completion) + ~100 (local) = ~850, window=1000 → 85%
+        assert!(
+            manager.needs_compaction(0.8),
+            "should need compaction with local items pushing past 80%"
+        );
     }
 }
 
@@ -365,11 +497,18 @@ pub enum ContextFragment {
     /// Plugin capability summary.
     PluginCapability { plugin_id: String, content: String },
     /// Conversation message.
-    ConversationMessage { role: String, content: String, message_id: Option<MessageId> },
+    ConversationMessage {
+        role: String,
+        content: String,
+        message_id: Option<MessageId>,
+    },
     /// Tool call result (pending continuation material — never dropped).
     ToolResult { call_id: String, content: String },
     /// Reasoning content required for replay (never dropped).
-    ReasoningReplay { message_id: MessageId, content: String },
+    ReasoningReplay {
+        message_id: MessageId,
+        content: String,
+    },
     /// Environment info (workspace, git, etc.).
     Environment { content: String },
 }
@@ -394,8 +533,9 @@ impl ContextFragment {
     pub fn role(&self) -> FragmentRole {
         match self {
             ContextFragment::System { .. } => FragmentRole::System,
-            ContextFragment::ToolResult { .. }
-            | ContextFragment::ReasoningReplay { .. } => FragmentRole::User,
+            ContextFragment::ToolResult { .. } | ContextFragment::ReasoningReplay { .. } => {
+                FragmentRole::User
+            }
             _ => FragmentRole::Developer,
         }
     }
@@ -441,10 +581,20 @@ pub struct AssembledContext {
 /// Record of what was done during overflow.
 #[derive(Debug, Clone)]
 pub enum OverflowAction {
-    DroppedPluginCapability { plugin_id: String },
-    DroppedInactiveSkill { skill_name: String },
-    TruncatedToolOutput { call_id: String, original_tokens: u64, truncated_tokens: u64 },
-    CompactedHistory { removed_messages: usize },
+    DroppedPluginCapability {
+        plugin_id: String,
+    },
+    DroppedInactiveSkill {
+        skill_name: String,
+    },
+    TruncatedToolOutput {
+        call_id: String,
+        original_tokens: u64,
+        truncated_tokens: u64,
+    },
+    CompactedHistory {
+        removed_messages: usize,
+    },
 }
 
 /// Assemble context from fragments, respecting the token budget.
@@ -464,18 +614,37 @@ pub fn assemble_context(
     let mut overflow_actions = Vec::new();
 
     // Separate fragments by priority.
-    let (protected, rest): (Vec<_>, Vec<_>) =
-        fragments.into_iter().partition(|f| f.is_protected());
+    let (protected, rest): (Vec<_>, Vec<_>) = fragments.into_iter().partition(|f| f.is_protected());
 
     // Count ALL tokens up front so budget decisions are based on real consumption.
     let protected_tokens: u64 = protected.iter().map(|f| f.estimated_tokens()).sum();
     budget.consume(protected_tokens);
 
-    let mut plugins: Vec<_> = rest.iter().filter(|f| matches!(f, ContextFragment::PluginCapability { .. })).cloned().collect();
-    let mut skills: Vec<_> = rest.iter().filter(|f| matches!(f, ContextFragment::SkillInstruction { .. })).cloned().collect();
-    let mut history: VecDeque<_> = rest.iter().filter(|f| matches!(f, ContextFragment::ConversationMessage { .. })).cloned().collect();
-    let tool_schemas: Vec<_> = rest.iter().filter(|f| matches!(f, ContextFragment::ToolSchemas { .. })).cloned().collect();
-    let env: Vec<_> = rest.iter().filter(|f| matches!(f, ContextFragment::Environment { .. })).cloned().collect();
+    let mut plugins: Vec<_> = rest
+        .iter()
+        .filter(|f| matches!(f, ContextFragment::PluginCapability { .. }))
+        .cloned()
+        .collect();
+    let mut skills: Vec<_> = rest
+        .iter()
+        .filter(|f| matches!(f, ContextFragment::SkillInstruction { .. }))
+        .cloned()
+        .collect();
+    let mut history: VecDeque<_> = rest
+        .iter()
+        .filter(|f| matches!(f, ContextFragment::ConversationMessage { .. }))
+        .cloned()
+        .collect();
+    let tool_schemas: Vec<_> = rest
+        .iter()
+        .filter(|f| matches!(f, ContextFragment::ToolSchemas { .. }))
+        .cloned()
+        .collect();
+    let env: Vec<_> = rest
+        .iter()
+        .filter(|f| matches!(f, ContextFragment::Environment { .. }))
+        .cloned()
+        .collect();
 
     // Consume all non-protected fragments' estimated tokens to detect overflow.
     let non_protected_tokens: u64 = rest.iter().map(|f| f.estimated_tokens()).sum();
@@ -509,7 +678,11 @@ pub fn assemble_context(
     // 3. Truncate large tool outputs (older ones first).
     // Tool results that are protected are in the `protected` vec; any in `rest`
     // are eligible for truncation.
-    let mut tool_results: Vec<_> = rest.iter().filter(|f| matches!(f, ContextFragment::ToolResult { .. })).cloned().collect();
+    let mut tool_results: Vec<_> = rest
+        .iter()
+        .filter(|f| matches!(f, ContextFragment::ToolResult { .. }))
+        .cloned()
+        .collect();
     for tr in &mut tool_results {
         if !budget.is_exhausted() {
             break;
@@ -518,7 +691,9 @@ pub fn assemble_context(
         if est > 500 {
             let truncated = est / 2;
             if let ContextFragment::ToolResult { call_id, .. } = tr {
-                budget.consumed = budget.consumed.saturating_sub(est.saturating_sub(truncated));
+                budget.consumed = budget
+                    .consumed
+                    .saturating_sub(est.saturating_sub(truncated));
                 overflow_actions.push(OverflowAction::TruncatedToolOutput {
                     call_id: call_id.clone(),
                     original_tokens: est,
@@ -605,8 +780,12 @@ mod tests {
     #[test]
     fn test_assemble_context_truncates_under_budget() {
         let fragments = vec![
-            ContextFragment::System { content: "You are an agent.".into() },
-            ContextFragment::ToolSchemas { content: "read_file, write_file".into() },
+            ContextFragment::System {
+                content: "You are an agent.".into(),
+            },
+            ContextFragment::ToolSchemas {
+                content: "read_file, write_file".into(),
+            },
             ContextFragment::ConversationMessage {
                 role: "user".into(),
                 content: "Fix the bug".into(),

@@ -13,8 +13,7 @@ use deepomni_protocol::{EventFrame, ToolOutput};
 
 use async_trait::async_trait;
 use deepomni_model_provider::{
-    ModelDelta, ModelInfo, ModelProvider, ModelProviderError,
-    ModelRequest, ModelStream,
+    ModelDelta, ModelInfo, ModelProvider, ModelProviderError, ModelRequest, ModelStream,
 };
 
 // ── Temp workspace ──
@@ -169,16 +168,16 @@ impl ModelProvider for MockModelProvider {
         }]
     }
 
-    async fn stream(
-        &self,
-        _request: ModelRequest,
-    ) -> Result<ModelStream, ModelProviderError> {
-        let resp = self.next_response().await.unwrap_or_else(|| MockModelResponse {
-            text_deltas: vec!["mock fallback".into()],
-            reasoning_deltas: vec![],
-            reasoning_replay_required: false,
-            tool_calls: vec![],
-        });
+    async fn stream(&self, _request: ModelRequest) -> Result<ModelStream, ModelProviderError> {
+        let resp = self
+            .next_response()
+            .await
+            .unwrap_or_else(|| MockModelResponse {
+                text_deltas: vec!["mock fallback".into()],
+                reasoning_deltas: vec![],
+                reasoning_replay_required: false,
+                tool_calls: vec![],
+            });
         Ok(Self::to_stream(resp).await)
     }
 }
@@ -195,7 +194,15 @@ pub fn mock_text_response(text: &str) -> MockModelResponse {
 
 /// Create a mock response with a single tool call.
 pub fn mock_tool_call_response(tool_name: &str, arguments: Value) -> MockModelResponse {
-    let call_id = format!("call-{}", uuid::Uuid::new_v4().simple().to_string().chars().take(8).collect::<String>());
+    let call_id = format!(
+        "call-{}",
+        uuid::Uuid::new_v4()
+            .simple()
+            .to_string()
+            .chars()
+            .take(8)
+            .collect::<String>()
+    );
     MockModelResponse {
         text_deltas: vec![],
         reasoning_deltas: vec![],
@@ -209,7 +216,11 @@ pub fn mock_tool_call_response(tool_name: &str, arguments: Value) -> MockModelRe
 }
 
 /// Create a mock response with reasoning deltas (DeepSeek thinking mode).
-pub fn mock_reasoning_response(reasoning: &str, text: &str, replay_required: bool) -> MockModelResponse {
+pub fn mock_reasoning_response(
+    reasoning: &str,
+    text: &str,
+    replay_required: bool,
+) -> MockModelResponse {
     MockModelResponse {
         text_deltas: vec![text.to_string()],
         reasoning_deltas: vec![reasoning.to_string()],
@@ -298,14 +309,8 @@ impl EventCollector {
     where
         F: Fn(&EventFrame) -> bool,
     {
-        let last = self
-            .events
-            .last()
-            .expect("no events collected");
-        assert!(
-            predicate(last),
-            "last event did not match expected variant"
-        );
+        let last = self.events.last().expect("no events collected");
+        assert!(predicate(last), "last event did not match expected variant");
     }
 }
 
@@ -370,6 +375,9 @@ mod tests {
             user_input: "test".into(),
         });
         collector.assert_contains_event(|e| matches!(e, EventFrame::TurnStarted { .. }));
-        assert_eq!(collector.count(|e| matches!(e, EventFrame::TurnStarted { .. })), 1);
+        assert_eq!(
+            collector.count(|e| matches!(e, EventFrame::TurnStarted { .. })),
+            1
+        );
     }
 }

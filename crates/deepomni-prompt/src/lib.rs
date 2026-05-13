@@ -36,7 +36,11 @@ impl PromptBuilder {
     pub fn build(&self) -> BuiltPrompt {
         if let Some(ref ov) = self.override_prompt {
             let hash = hash_content(ov);
-            return BuiltPrompt { content: ov.clone(), static_hash: hash, cacheable: true };
+            return BuiltPrompt {
+                content: ov.clone(),
+                static_hash: hash,
+                cacheable: true,
+            };
         }
 
         let mut parts: Vec<&str> = Vec::new();
@@ -55,7 +59,11 @@ impl PromptBuilder {
 
         let content = parts.join("\n\n");
         let hash = hash_content(&content);
-        BuiltPrompt { content, static_hash: hash, cacheable: true }
+        BuiltPrompt {
+            content,
+            static_hash: hash,
+            cacheable: true,
+        }
     }
 
     pub fn with_override(mut self, prompt: String) -> Self {

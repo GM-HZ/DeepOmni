@@ -156,6 +156,7 @@ fn test_tool_call_completed_json() {
     assert_roundtrip(&EventFrame::ToolCallCompleted {
         turn_id: TurnId::from_string("turn-1"),
         call_id: ToolCallId::from_string("call-1"),
+        tool_name: "read_file".into(),
         success: true,
         output_preview: Some("file content...".into()),
     });
@@ -246,31 +247,118 @@ fn test_all_event_tags_unique() {
     use std::collections::HashSet;
     let mut tags = HashSet::new();
     let events: Vec<EventFrame> = vec![
-        EventFrame::ThreadCreated { thread_id: ThreadId::from_string("t"), workspace: "/w".into() },
-        EventFrame::ThreadUpdated { thread_id: ThreadId::from_string("t") },
-        EventFrame::ThreadArchived { thread_id: ThreadId::from_string("t") },
-        EventFrame::TurnStarted { thread_id: ThreadId::from_string("t"), turn_id: TurnId::from_string("t1"), user_input: "u".into() },
-        EventFrame::TurnSteered { thread_id: ThreadId::from_string("t"), turn_id: TurnId::from_string("t1"), steering_input: "s".into() },
-        EventFrame::TurnInterrupted { thread_id: ThreadId::from_string("t"), turn_id: TurnId::from_string("t1") },
-        EventFrame::AssistantMessageDelta { turn_id: TurnId::from_string("t1"), message_id: MessageId::from_string("m"), delta: "d".into() },
-        EventFrame::AssistantMessageCompleted { turn_id: TurnId::from_string("t1"), message_id: MessageId::from_string("m") },
-        EventFrame::AssistantReasoningDelta { turn_id: TurnId::from_string("t1"), message_id: MessageId::from_string("m"), delta: "r".into(), replay_required: false, visibility: ReasoningVisibility::HostRenderable },
-        EventFrame::AssistantReasoningCompleted { turn_id: TurnId::from_string("t1"), message_id: MessageId::from_string("m"), replay_required: false },
-        EventFrame::ToolCallStarted { turn_id: TurnId::from_string("t1"), call_id: ToolCallId::from_string("c"), tool_name: "read_file".into() },
-        EventFrame::ToolCallArgumentsDelta { turn_id: TurnId::from_string("t1"), call_id: ToolCallId::from_string("c"), delta: "{}".into() },
-        EventFrame::ToolCallRequiresApproval { turn_id: TurnId::from_string("t1"), call_id: ToolCallId::from_string("c"), tool_name: "shell_exec".into(), reason: "mutating".into() },
-        EventFrame::ToolCallApproved { turn_id: TurnId::from_string("t1"), call_id: ToolCallId::from_string("c") },
-        EventFrame::ToolCallRejected { turn_id: TurnId::from_string("t1"), call_id: ToolCallId::from_string("c") },
-        EventFrame::ToolCallCompleted { turn_id: TurnId::from_string("t1"), call_id: ToolCallId::from_string("c"), success: true, output_preview: None },
-        EventFrame::ToolCallFailed { turn_id: TurnId::from_string("t1"), call_id: ToolCallId::from_string("c"), error: "e".into() },
-        EventFrame::ContextCompactionStarted { turn_id: TurnId::from_string("t1") },
-        EventFrame::ContextCompactionCompleted { turn_id: TurnId::from_string("t1") },
-        EventFrame::SubagentSpawned { parent_turn_id: TurnId::from_string("t1"), subagent_id: SubagentId::from_string("s"), task: "review".into() },
-        EventFrame::SubagentCompleted { parent_turn_id: TurnId::from_string("t1"), subagent_id: SubagentId::from_string("s"), result_summary: "done".into() },
-        EventFrame::SubagentFailed { parent_turn_id: TurnId::from_string("t1"), subagent_id: SubagentId::from_string("s"), error: "fail".into() },
-        EventFrame::TurnCompleted { turn_id: TurnId::from_string("t1") },
-        EventFrame::TurnFailed { turn_id: TurnId::from_string("t1"), error: "fatal".into() },
-        EventFrame::RuntimeWarning { message: "warn".into() },
+        EventFrame::ThreadCreated {
+            thread_id: ThreadId::from_string("t"),
+            workspace: "/w".into(),
+        },
+        EventFrame::ThreadUpdated {
+            thread_id: ThreadId::from_string("t"),
+        },
+        EventFrame::ThreadArchived {
+            thread_id: ThreadId::from_string("t"),
+        },
+        EventFrame::TurnStarted {
+            thread_id: ThreadId::from_string("t"),
+            turn_id: TurnId::from_string("t1"),
+            user_input: "u".into(),
+        },
+        EventFrame::TurnSteered {
+            thread_id: ThreadId::from_string("t"),
+            turn_id: TurnId::from_string("t1"),
+            steering_input: "s".into(),
+        },
+        EventFrame::TurnInterrupted {
+            thread_id: ThreadId::from_string("t"),
+            turn_id: TurnId::from_string("t1"),
+        },
+        EventFrame::AssistantMessageDelta {
+            turn_id: TurnId::from_string("t1"),
+            message_id: MessageId::from_string("m"),
+            delta: "d".into(),
+        },
+        EventFrame::AssistantMessageCompleted {
+            turn_id: TurnId::from_string("t1"),
+            message_id: MessageId::from_string("m"),
+        },
+        EventFrame::AssistantReasoningDelta {
+            turn_id: TurnId::from_string("t1"),
+            message_id: MessageId::from_string("m"),
+            delta: "r".into(),
+            replay_required: false,
+            visibility: ReasoningVisibility::HostRenderable,
+        },
+        EventFrame::AssistantReasoningCompleted {
+            turn_id: TurnId::from_string("t1"),
+            message_id: MessageId::from_string("m"),
+            replay_required: false,
+        },
+        EventFrame::ToolCallStarted {
+            turn_id: TurnId::from_string("t1"),
+            call_id: ToolCallId::from_string("c"),
+            tool_name: "read_file".into(),
+        },
+        EventFrame::ToolCallArgumentsDelta {
+            turn_id: TurnId::from_string("t1"),
+            call_id: ToolCallId::from_string("c"),
+            delta: "{}".into(),
+        },
+        EventFrame::ToolCallRequiresApproval {
+            turn_id: TurnId::from_string("t1"),
+            call_id: ToolCallId::from_string("c"),
+            tool_name: "shell_exec".into(),
+            reason: "mutating".into(),
+        },
+        EventFrame::ToolCallApproved {
+            turn_id: TurnId::from_string("t1"),
+            call_id: ToolCallId::from_string("c"),
+        },
+        EventFrame::ToolCallRejected {
+            turn_id: TurnId::from_string("t1"),
+            call_id: ToolCallId::from_string("c"),
+        },
+        EventFrame::ToolCallCompleted {
+            turn_id: TurnId::from_string("t1"),
+            call_id: ToolCallId::from_string("c"),
+            tool_name: "read_file".into(),
+            success: true,
+            output_preview: None,
+        },
+        EventFrame::ToolCallFailed {
+            turn_id: TurnId::from_string("t1"),
+            call_id: ToolCallId::from_string("c"),
+            error: "e".into(),
+        },
+        EventFrame::ContextCompactionStarted {
+            turn_id: TurnId::from_string("t1"),
+        },
+        EventFrame::ContextCompactionCompleted {
+            turn_id: TurnId::from_string("t1"),
+        },
+        EventFrame::SubagentSpawned {
+            parent_turn_id: TurnId::from_string("t1"),
+            subagent_id: SubagentId::from_string("s"),
+            task: "review".into(),
+        },
+        EventFrame::SubagentCompleted {
+            parent_turn_id: TurnId::from_string("t1"),
+            subagent_id: SubagentId::from_string("s"),
+            result_summary: "done".into(),
+        },
+        EventFrame::SubagentFailed {
+            parent_turn_id: TurnId::from_string("t1"),
+            subagent_id: SubagentId::from_string("s"),
+            error: "fail".into(),
+        },
+        EventFrame::TurnCompleted {
+            turn_id: TurnId::from_string("t1"),
+        },
+        EventFrame::TurnFailed {
+            turn_id: TurnId::from_string("t1"),
+            error: "fatal".into(),
+        },
+        EventFrame::RuntimeWarning {
+            message: "warn".into(),
+        },
     ];
     for event in &events {
         let json = serde_json::to_string(event).unwrap();
@@ -284,4 +372,22 @@ fn test_all_event_tags_unique() {
         assert!(tags.insert(tag.clone()), "duplicate event tag: {tag}");
     }
     assert_eq!(tags.len(), 25, "all 25 event types must have unique tags");
+}
+
+/// Plan 4 Task 1: InterAgentMessage serializes with trigger_turn field.
+#[test]
+fn inter_agent_message_serializes_with_trigger_turn() {
+    use deepomni_protocol::agent::{AgentPath, InterAgentMessage};
+    let message = InterAgentMessage {
+        author: AgentPath::root(),
+        recipient: AgentPath::from_string("/root/worker"),
+        other_recipients: Vec::new(),
+        content: "done".into(),
+        trigger_turn: true,
+    };
+    let json = serde_json::to_value(&message).unwrap();
+    assert_eq!(json["trigger_turn"], true);
+    assert_eq!(json["content"], "done");
+    assert_eq!(json["author"], "/root");
+    assert_eq!(json["recipient"], "/root/worker");
 }

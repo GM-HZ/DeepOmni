@@ -96,6 +96,7 @@ pub enum EventFrame {
     ToolCallCompleted {
         turn_id: TurnId,
         call_id: ToolCallId,
+        tool_name: String,
         success: bool,
         /// Summary of tool output (may be truncated).
         output_preview: Option<String>,

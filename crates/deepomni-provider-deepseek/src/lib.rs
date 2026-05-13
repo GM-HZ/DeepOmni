@@ -17,8 +17,8 @@ use tokio::sync::Mutex;
 use tracing::debug;
 
 use deepomni_model_provider::{
-    MessageRole, ModelDelta, ModelInfo, ModelProvider,
-    ModelProviderError, ModelRequest, ReasoningReplay,
+    MessageRole, ModelDelta, ModelInfo, ModelProvider, ModelProviderError, ModelRequest,
+    ReasoningReplay,
 };
 
 // ── DeepSeek defaults ──
@@ -251,18 +251,20 @@ impl DeepSeekProvider {
 
             // Reasoning content.
             if let Some(ref reasoning) = delta.reasoning_content
-                && !reasoning.is_empty() {
-                    deltas.push(ModelDelta::Reasoning {
-                        delta: reasoning.clone(),
-                        replay_required: true,
-                    });
-                }
+                && !reasoning.is_empty()
+            {
+                deltas.push(ModelDelta::Reasoning {
+                    delta: reasoning.clone(),
+                    replay_required: true,
+                });
+            }
 
             // Text content.
             if let Some(ref content) = delta.content
-                && !content.is_empty() {
-                    deltas.push(ModelDelta::Text(content.clone()));
-                }
+                && !content.is_empty()
+            {
+                deltas.push(ModelDelta::Text(content.clone()));
+            }
 
             // Tool call deltas.
             if let Some(ref tool_calls) = delta.tool_calls {
@@ -302,8 +304,8 @@ impl DeepSeekProvider {
                 if finish == "tool_calls" || finish == "stop" {
                     for state in tool_call_states.iter() {
                         if state.name.is_some() && state.id.is_some() {
-                            let args: Value = serde_json::from_str(&state.arguments)
-                                .unwrap_or(Value::Null);
+                            let args: Value =
+                                serde_json::from_str(&state.arguments).unwrap_or(Value::Null);
                             deltas.push(ModelDelta::ToolCallComplete {
                                 call_id: state.id.clone().unwrap(),
                                 tool_name: state.name.clone().unwrap(),
@@ -322,7 +324,10 @@ impl DeepSeekProvider {
     }
 
     /// Build the chat completion request body.
-    fn build_request(&self, request: &ModelRequest) -> Result<ChatCompletionRequest, ModelProviderError> {
+    fn build_request(
+        &self,
+        request: &ModelRequest,
+    ) -> Result<ChatCompletionRequest, ModelProviderError> {
         let model = if request.model.is_empty() {
             self.default_model.clone()
         } else {
@@ -418,13 +423,15 @@ impl DeepSeekProvider {
             // Attach reasoning replay to assistant messages with tool calls.
             // Match by position: the Nth assistant message with tool_calls
             // gets the Nth ReasoningReplay entry.
-            if msg.role == MessageRole::Assistant && !msg.tool_calls.is_empty()
-                && replay_idx < replay_entries.len() && chat_msg.reasoning_content.is_none() {
-                    chat_msg.reasoning_content = Some(
-                        replay_entries[replay_idx].reasoning_content.clone()
-                    );
-                    replay_idx += 1;
-                }
+            if msg.role == MessageRole::Assistant
+                && !msg.tool_calls.is_empty()
+                && replay_idx < replay_entries.len()
+                && chat_msg.reasoning_content.is_none()
+            {
+                chat_msg.reasoning_content =
+                    Some(replay_entries[replay_idx].reasoning_content.clone());
+                replay_idx += 1;
+            }
 
             messages.push(chat_msg);
         }
@@ -440,7 +447,8 @@ impl DeepSeekProvider {
                     && msg.reasoning_content.is_none()
                 {
                     return Err(ModelProviderError::InvalidResponse(
-                        "reasoning replay required for assistant tool-call messages but missing".into(),
+                        "reasoning replay required for assistant tool-call messages but missing"
+                            .into(),
                     ));
                 }
             }
@@ -534,7 +542,9 @@ impl ModelProvider for DeepSeekProvider {
                         }
                     }
                     Some(Err(e)) => {
-                        let _ = tx.send(Err(ModelProviderError::StreamError(e.to_string()))).await;
+                        let _ = tx
+                            .send(Err(ModelProviderError::StreamError(e.to_string())))
+                            .await;
                         return;
                     }
                     None => {
@@ -545,7 +555,8 @@ impl ModelProvider for DeepSeekProvider {
             }
         });
 
-        Ok(Box::new(tokio_stream::wrappers::ReceiverStream::new(rx)) as deepomni_model_provider::ModelStream)
+        Ok(Box::new(tokio_stream::wrappers::ReceiverStream::new(rx))
+            as deepomni_model_provider::ModelStream)
     }
 }
 
@@ -597,7 +608,10 @@ mod tests {
         let mut states = Vec::new();
         let deltas = DeepSeekProvider::parse_sse_line(data, &mut states);
         match &deltas[0] {
-            ModelDelta::Reasoning { delta, replay_required } => {
+            ModelDelta::Reasoning {
+                delta,
+                replay_required,
+            } => {
                 assert_eq!(delta, "thinking...");
                 assert!(*replay_required);
             }
@@ -611,7 +625,9 @@ mod tests {
         let mut states = vec![ToolCallState::default()];
         let deltas = DeepSeekProvider::parse_sse_line(data, &mut states);
         // Should have start, args delta, and complete.
-        let has_complete = deltas.iter().any(|d| matches!(d, ModelDelta::ToolCallComplete { .. }));
+        let has_complete = deltas
+            .iter()
+            .any(|d| matches!(d, ModelDelta::ToolCallComplete { .. }));
         assert!(has_complete);
     }
 

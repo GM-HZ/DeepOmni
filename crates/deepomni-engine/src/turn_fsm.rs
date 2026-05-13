@@ -1,90 +1,138 @@
+//! TurnStateMachine — owns the turn lifecycle from Started to Completed/Failed.
+//! This is the single authority for turn state transitions.
+
+use deepomni_protocol::id::{ThreadId, TurnId};
+
+/// Turn lifecycle states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnState {
-    Created,
+    Started,
     Streaming,
-    AwaitingApproval,
-    Continuing,
+    WaitingForApproval,
+    ExecutingTool,
     Completed,
     Failed,
+    Interrupted,
 }
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum TurnStateError {
-    #[error("invalid turn state transition: {from:?} -> {to:?}")]
-    InvalidTransition { from: TurnState, to: TurnState },
+impl TurnState {
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            TurnState::Completed | TurnState::Failed | TurnState::Interrupted
+        )
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TurnState::Started => "started",
+            TurnState::Streaming => "streaming",
+            TurnState::WaitingForApproval => "waiting_for_approval",
+            TurnState::ExecutingTool => "executing_tool",
+            TurnState::Completed => "completed",
+            TurnState::Failed => "failed",
+            TurnState::Interrupted => "interrupted",
+        }
+    }
 }
 
-#[derive(Debug, Clone)]
+/// The turn state machine. Tracks a single turn's lifecycle.
+#[derive(Clone)]
 pub struct TurnStateMachine {
-    state: TurnState,
+    pub thread_id: ThreadId,
+    pub turn_id: TurnId,
+    pub state: TurnState,
+    pub user_input: String,
 }
 
 impl TurnStateMachine {
-    pub fn new() -> Self {
+    pub fn new(thread_id: ThreadId, turn_id: TurnId, user_input: String) -> Self {
         Self {
-            state: TurnState::Created,
+            thread_id,
+            turn_id,
+            state: TurnState::Started,
+            user_input,
         }
     }
 
-    pub fn state(&self) -> TurnState {
-        self.state
-    }
-
-    pub fn transition(&mut self, to: TurnState) -> Result<(), TurnStateError> {
-        if is_valid(self.state, to) {
-            self.state = to;
+    /// Transition to a new state. Returns error if the transition is invalid.
+    pub fn transition(&mut self, new_state: TurnState) -> Result<(), TurnFsmError> {
+        let valid = match (self.state, new_state) {
+            (TurnState::Started, TurnState::Streaming) => true,
+            (TurnState::Streaming, TurnState::WaitingForApproval) => true,
+            (TurnState::Streaming, TurnState::ExecutingTool) => true,
+            (TurnState::Streaming, TurnState::Completed) => true,
+            (TurnState::Streaming, TurnState::Failed) => true,
+            (TurnState::WaitingForApproval, TurnState::ExecutingTool) => true,
+            (TurnState::WaitingForApproval, TurnState::Failed) => true,
+            (TurnState::ExecutingTool, TurnState::Streaming) => true, // continue after tool
+            (TurnState::ExecutingTool, TurnState::Completed) => true,
+            (TurnState::ExecutingTool, TurnState::Failed) => true,
+            (_, TurnState::Interrupted) => true,
+            (_, s) if s == self.state => true, // re-entrant ok
+            _ => false,
+        };
+        if valid {
+            self.state = new_state;
             Ok(())
         } else {
-            Err(TurnStateError::InvalidTransition {
+            Err(TurnFsmError::InvalidTransition {
                 from: self.state,
-                to,
+                to: new_state,
             })
         }
     }
 }
 
-impl Default for TurnStateMachine {
-    fn default() -> Self {
-        Self::new()
+#[derive(Debug)]
+pub enum TurnFsmError {
+    InvalidTransition { from: TurnState, to: TurnState },
+}
+
+impl std::fmt::Display for TurnFsmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TurnFsmError::InvalidTransition { from, to } => {
+                write!(f, "invalid turn transition: {:?} -> {:?}", from, to)
+            }
+        }
     }
 }
 
-fn is_valid(from: TurnState, to: TurnState) -> bool {
-    matches!(
-        (from, to),
-        (TurnState::Created, TurnState::Streaming)
-            | (TurnState::Streaming, TurnState::AwaitingApproval)
-            | (TurnState::Streaming, TurnState::Completed)
-            | (TurnState::Streaming, TurnState::Failed)
-            | (TurnState::AwaitingApproval, TurnState::Continuing)
-            | (TurnState::AwaitingApproval, TurnState::Failed)
-            | (TurnState::Continuing, TurnState::Streaming)
-            | (TurnState::Continuing, TurnState::Completed)
-            | (TurnState::Continuing, TurnState::Failed)
-    )
-}
+impl std::error::Error for TurnFsmError {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn fsm_accepts_approval_resume_path() {
-        let mut fsm = TurnStateMachine::new();
-        fsm.transition(TurnState::Streaming).unwrap();
-        fsm.transition(TurnState::AwaitingApproval).unwrap();
-        fsm.transition(TurnState::Continuing).unwrap();
-        fsm.transition(TurnState::Streaming).unwrap();
-        fsm.transition(TurnState::Completed).unwrap();
-        assert_eq!(fsm.state(), TurnState::Completed);
+    fn test_valid_transitions() {
+        let mut fsm = TurnStateMachine::new(
+            ThreadId::from_string("t1"),
+            TurnId::from_string("tu1"),
+            "hello".into(),
+        );
+        assert!(fsm.transition(TurnState::Streaming).is_ok());
+        assert!(fsm.transition(TurnState::WaitingForApproval).is_ok());
+        assert!(fsm.transition(TurnState::ExecutingTool).is_ok());
+        assert!(fsm.transition(TurnState::Completed).is_ok());
     }
 
     #[test]
-    fn fsm_rejects_terminal_restart() {
-        let mut fsm = TurnStateMachine::new();
-        fsm.transition(TurnState::Streaming).unwrap();
-        fsm.transition(TurnState::Completed).unwrap();
-        assert!(fsm.transition(TurnState::Streaming).is_err());
+    fn test_invalid_transition() {
+        let mut fsm = TurnStateMachine::new(
+            ThreadId::from_string("t1"),
+            TurnId::from_string("tu1"),
+            "hello".into(),
+        );
+        // Can't go directly from Started to Completed.
+        assert!(fsm.transition(TurnState::Completed).is_err());
+    }
+
+    #[test]
+    fn test_terminal_states() {
+        assert!(TurnState::Completed.is_terminal());
+        assert!(TurnState::Failed.is_terminal());
+        assert!(!TurnState::Streaming.is_terminal());
     }
 }
-

@@ -165,12 +165,10 @@ impl SkillManager {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        let name = meta.name.unwrap_or_else(|| {
-            dir_name.replace(['-', '_'], " ")
-        });
-        let description = meta.description.unwrap_or_else(|| {
-            format!("Skill: {name}")
-        });
+        let name = meta
+            .name
+            .unwrap_or_else(|| dir_name.replace(['-', '_'], " "));
+        let description = meta.description.unwrap_or_else(|| format!("Skill: {name}"));
 
         let id = if let Some(pid) = plugin_id {
             format!("{pid}/{dir_name}")
@@ -212,7 +210,8 @@ impl SkillManager {
     /// Remove all skills from a plugin (on disable).
     pub fn remove_plugin_skills(&mut self, plugin_id: &str) -> usize {
         let before = self.skills.len();
-        self.skills.retain(|_, s| s.plugin_id.as_deref() != Some(plugin_id));
+        self.skills
+            .retain(|_, s| s.plugin_id.as_deref() != Some(plugin_id));
         before - self.skills.len()
     }
 
@@ -225,10 +224,7 @@ impl SkillManager {
             if used + skill.estimated_tokens > budget_tokens {
                 break;
             }
-            parts.push(format!(
-                "## Skill: {}\n{}\n",
-                skill.name, skill.content
-            ));
+            parts.push(format!("## Skill: {}\n{}\n", skill.name, skill.content));
             used += skill.estimated_tokens;
         }
 
@@ -336,9 +332,7 @@ mod tests {
     fn test_plugin_skills_namespaced() {
         let dir = setup_skill_dir();
         let mut manager = SkillManager::new(SkillRoots::new());
-        let count = manager
-            .discover_plugin_skills(&dir, "my-plugin")
-            .unwrap();
+        let count = manager.discover_plugin_skills(&dir, "my-plugin").unwrap();
         assert_eq!(count, 1);
 
         let skill = manager.get("my-plugin/my-skill").unwrap();

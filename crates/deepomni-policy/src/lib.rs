@@ -37,10 +37,7 @@ pub enum ApprovalRequirement {
     /// Execute immediately, no approval needed.
     Skip,
     /// Host must approve before execution.
-    NeedsApproval {
-        reason: String,
-        approval_id: String,
-    },
+    NeedsApproval { reason: String, approval_id: String },
     /// Hard-blocked; cannot be approved.
     Forbidden { reason: String },
 }
@@ -107,9 +104,7 @@ pub enum NetworkPolicy {
     /// No network access.
     DenyAll,
     /// Prompt user for each new host.
-    PromptPerHost {
-        approved_hosts: HashSet<String>,
-    },
+    PromptPerHost { approved_hosts: HashSet<String> },
 }
 
 impl Default for NetworkPolicy {
@@ -204,15 +199,16 @@ impl PolicyEngine {
 
         // Check explicit permissions.
         if let Some(perm) = permission
-            && !self.base_profile.is_allowed(perm) {
-                return PolicyDecision {
-                    approval: ApprovalRequirement::Forbidden {
-                        reason: format!("permission '{perm:?}' is denied"),
-                    },
-                    sandbox_required: false,
-                    network_policy: NetworkPolicy::DenyAll,
-                };
-            }
+            && !self.base_profile.is_allowed(perm)
+        {
+            return PolicyDecision {
+                approval: ApprovalRequirement::Forbidden {
+                    reason: format!("permission '{perm:?}' is denied"),
+                },
+                sandbox_required: false,
+                network_policy: NetworkPolicy::DenyAll,
+            };
+        }
 
         // Check approval cache for session-remembered decisions.
         let cache_key = format!("{tool_name}:mutating");
@@ -252,7 +248,10 @@ impl PolicyEngine {
 
     /// Grant a dynamic permission for the current session.
     pub fn grant_permission(&self, tool_pattern: &str) {
-        self.dynamic_grants.write().unwrap().insert(tool_pattern.to_string());
+        self.dynamic_grants
+            .write()
+            .unwrap()
+            .insert(tool_pattern.to_string());
     }
 
     /// Revoke a dynamic permission.
@@ -262,7 +261,9 @@ impl PolicyEngine {
 
     /// Grant a per-thread permission override.
     pub fn grant_thread_permission(&self, thread_id: &str, tool_pattern: &str) {
-        self.thread_grants.write().unwrap()
+        self.thread_grants
+            .write()
+            .unwrap()
             .entry(thread_id.to_string())
             .or_default()
             .insert(tool_pattern.to_string());
@@ -336,7 +337,10 @@ mod tests {
     fn test_remember_approval_cache() {
         let engine = PolicyEngine::new(AgentMode::Agent, PermissionProfile::default());
         let decision1 = engine.evaluate("write_file", true, None);
-        assert!(matches!(decision1.approval, ApprovalRequirement::NeedsApproval { .. }));
+        assert!(matches!(
+            decision1.approval,
+            ApprovalRequirement::NeedsApproval { .. }
+        ));
 
         engine.remember_approval("write_file");
         let decision2 = engine.evaluate("write_file", true, None);

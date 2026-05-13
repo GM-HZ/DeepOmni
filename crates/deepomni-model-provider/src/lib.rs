@@ -53,15 +53,9 @@ pub enum ModelDelta {
         replay_required: bool,
     },
     /// A tool call is being formed.
-    ToolCallStart {
-        call_id: String,
-        tool_name: String,
-    },
+    ToolCallStart { call_id: String, tool_name: String },
     /// Tool call argument delta (streaming).
-    ToolCallArgumentsDelta {
-        call_id: String,
-        delta: String,
-    },
+    ToolCallArgumentsDelta { call_id: String, delta: String },
     /// Tool call is complete and ready to execute.
     ToolCallComplete {
         call_id: String,
@@ -73,7 +67,8 @@ pub enum ModelDelta {
 }
 
 /// A streaming response from a model provider.
-pub type ModelStream = Box<dyn futures::Stream<Item = Result<ModelDelta, ModelProviderError>> + Send + Unpin>;
+pub type ModelStream =
+    Box<dyn futures::Stream<Item = Result<ModelDelta, ModelProviderError>> + Send + Unpin>;
 
 /// Request to a model provider.
 #[derive(Debug, Clone)]
@@ -134,10 +129,7 @@ pub trait ModelProvider: Send + Sync {
     fn known_models(&self) -> Vec<ModelInfo>;
 
     /// Stream a completion response.
-    async fn stream(
-        &self,
-        request: ModelRequest,
-    ) -> Result<ModelStream, ModelProviderError>;
+    async fn stream(&self, request: ModelRequest) -> Result<ModelStream, ModelProviderError>;
 }
 
 // ── Provider registry ──
@@ -163,8 +155,7 @@ impl ProviderRegistry {
     pub fn register(&mut self, provider: Arc<dyn ModelProvider>) {
         for model in provider.known_models() {
             for alias in &model.aliases {
-                self.alias_map
-                    .insert(alias.clone(), model.id.clone());
+                self.alias_map.insert(alias.clone(), model.id.clone());
             }
             self.models.push(model);
         }
@@ -263,15 +254,10 @@ mod tests {
             self.models.clone()
         }
 
-        async fn stream(
-            &self,
-            _request: ModelRequest,
-        ) -> Result<ModelStream, ModelProviderError> {
+        async fn stream(&self, _request: ModelRequest) -> Result<ModelStream, ModelProviderError> {
             // Return a stream that emits a single text delta then ends.
-            let deltas: Vec<Result<ModelDelta, ModelProviderError>> = vec![
-                Ok(ModelDelta::Text("hello".into())),
-                Ok(ModelDelta::End),
-            ];
+            let deltas: Vec<Result<ModelDelta, ModelProviderError>> =
+                vec![Ok(ModelDelta::Text("hello".into())), Ok(ModelDelta::End)];
             Ok(Box::new(futures::stream::iter(deltas)))
         }
     }

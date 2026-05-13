@@ -25,7 +25,10 @@ pub enum TaskStatus {
 
 impl TaskStatus {
     pub fn is_terminal(&self) -> bool {
-        matches!(self, TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled)
+        matches!(
+            self,
+            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+        )
     }
 }
 
@@ -88,7 +91,8 @@ impl TaskRecord {
 }
 
 /// A task execution function.
-pub type TaskFn = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send>;
+pub type TaskFn =
+    Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send>;
 type PersistFn = Arc<dyn Fn(&TaskRecord) + Send + Sync>;
 
 /// Manages a durable background task queue with retry and worker pool.
@@ -148,7 +152,9 @@ impl TaskManager {
             if let Some(record) = guard.get_mut(&id) {
                 record.status = TaskStatus::Running;
                 record.updated_at = current_timestamp();
-                if let Some(ref p) = persist { p(record); }
+                if let Some(ref p) = persist {
+                    p(record);
+                }
             }
         }
 
@@ -172,8 +178,10 @@ impl TaskManager {
                             record.status = TaskStatus::Queued;
                             record.retry.next_retry_at_ms =
                                 Some(current_timestamp_ms() + record.retry.next_delay_ms());
-                            record.detail = Some(format!("retry {}/{}: {e}",
-                                record.retry.attempt, record.retry.max_attempts));
+                            record.detail = Some(format!(
+                                "retry {}/{}: {e}",
+                                record.retry.attempt, record.retry.max_attempts
+                            ));
                             warn!(task_id = %id, "task failed, will retry");
                         } else {
                             record.status = TaskStatus::Failed;
@@ -182,7 +190,9 @@ impl TaskManager {
                         }
                     }
                 }
-                if let Some(ref p) = persist { p(record); }
+                if let Some(ref p) = persist {
+                    p(record);
+                }
             }
         });
     }
@@ -195,7 +205,9 @@ impl TaskManager {
         {
             record.status = TaskStatus::Cancelled;
             record.updated_at = current_timestamp();
-            if let Some(ref p) = self.persist_fn { p(record); }
+            if let Some(ref p) = self.persist_fn {
+                p(record);
+            }
             return true;
         }
         false
@@ -213,7 +225,10 @@ impl TaskManager {
 
     /// List active (non-terminal) tasks.
     pub async fn list_active(&self) -> Vec<TaskRecord> {
-        self.tasks.read().await.values()
+        self.tasks
+            .read()
+            .await
+            .values()
             .filter(|t| !t.status.is_terminal())
             .cloned()
             .collect()
@@ -227,7 +242,8 @@ impl TaskManager {
     {
         let record = self.get(task_id).await;
         if let Some(rec) = record
-            && rec.status == TaskStatus::Queued && rec.retry.should_retry()
+            && rec.status == TaskStatus::Queued
+            && rec.retry.should_retry()
         {
             self.spawn(task_id, f).await;
         }

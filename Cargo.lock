@@ -347,12 +347,15 @@ dependencies = [
  "async-trait",
  "deepomni-context",
  "deepomni-core",
+ "deepomni-engine",
  "deepomni-journal",
  "deepomni-model-provider",
  "deepomni-policy",
  "deepomni-protocol",
+ "deepomni-sandbox",
  "deepomni-test-support",
  "deepomni-tools",
+ "deepomni-trace",
  "futures",
  "serde",
  "serde_json",
@@ -409,6 +412,7 @@ dependencies = [
  "deepomni-model-provider",
  "deepomni-protocol",
  "serde",
+ "serde_json",
  "sha2",
 ]
 
@@ -426,15 +430,14 @@ dependencies = [
 name = "deepomni-engine"
 version = "0.1.0"
 dependencies = [
- "deepomni-agent",
+ "async-trait",
  "deepomni-context",
  "deepomni-journal",
  "deepomni-model-provider",
  "deepomni-protocol",
- "deepomni-tools",
  "serde",
  "serde_json",
- "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -569,6 +572,7 @@ dependencies = [
  "deepomni-config",
  "deepomni-context",
  "deepomni-core",
+ "deepomni-engine",
  "deepomni-events",
  "deepomni-hooks",
  "deepomni-journal",
@@ -583,6 +587,7 @@ dependencies = [
  "deepomni-test-support",
  "deepomni-tool-builtin",
  "deepomni-tools",
+ "deepomni-trace",
  "serde",
  "serde_json",
  "tokio",
@@ -613,6 +618,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
 ]
@@ -696,11 +702,19 @@ dependencies = [
  "deepomni-core",
  "deepomni-policy",
  "deepomni-protocol",
+ "deepomni-sandbox",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "deepomni-trace"
+version = "0.1.0"
+dependencies = [
+ "deepomni-protocol",
 ]
 
 [[package]]

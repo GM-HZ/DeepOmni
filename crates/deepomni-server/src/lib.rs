@@ -8,13 +8,12 @@
 use std::sync::Arc;
 
 use axum::{
-    Router,
+    Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
     middleware,
     response::sse::{Event, Sse},
     routing::{get, post},
-    Json,
 };
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
@@ -22,6 +21,8 @@ use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 
 use deepomni_protocol::id::ThreadId;
+
+pub mod protocol_adapter;
 
 /// Shared application state.
 pub struct AppState {
@@ -42,7 +43,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/threads/{id}/turns", post(create_turn))
         .route("/threads/{id}/turns/{turn_id}/approve", post(approve_tool))
         .route("/threads/{id}/turns/{turn_id}/reject", post(reject_tool))
-        .route("/threads/{id}/turns/{turn_id}/interrupt", post(interrupt_turn))
+        .route(
+            "/threads/{id}/turns/{turn_id}/interrupt",
+            post(interrupt_turn),
+        )
         .route("/threads/{id}/events", get(stream_events))
         .route("/tools", get(list_tools))
         .route("/skills", get(list_skills))
@@ -164,10 +168,23 @@ async fn get_thread(
     })))
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct UpdateThreadBody {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
 async fn update_thread(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Json(body): Json<UpdateThreadBody>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    state
+        .runtime
+        .update_thread_meta(&id, body.name, body.status)
+        .map_err(|_| StatusCode::NOT_FOUND)?;
     Ok(Json(serde_json::json!({
         "thread_id": id,
         "updated": true
@@ -188,25 +205,21 @@ async fn create_turn(
     Path(thread_id): Path<String>,
     Json(body): Json<CreateTurnBody>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let tid = ThreadId::from_string(thread_id.clone());
     let request = deepomni_protocol::CreateTurnRequest {
-        input: body.input,
-        model: body.model,
+        input: body.input.clone(),
+        model: body.model.clone(),
         parent_turn_id: None,
         subagent_id: None,
         max_token_budget: body.max_token_budget,
     };
 
-    let turn = state
-        .runtime
-        .submit_turn(
-            ThreadId::from_string(thread_id.clone()),
-            request,
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!("failed to create turn: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    // submit_turn now routes through SessionLoop when available (Phase 1),
+    // so no separate try_submit_op is needed.
+    let turn = state.runtime.submit_turn(tid, request).await.map_err(|e| {
+        tracing::error!("failed to create turn: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok(Json(serde_json::json!({
         "thread_id": thread_id,
@@ -219,12 +232,12 @@ async fn approve_tool(
     State(state): State<Arc<AppState>>,
     Path((thread_id, turn_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let tid = deepomni_protocol::id::ThreadId::from_string(thread_id.clone());
+    let tuid = deepomni_protocol::id::TurnId::from_string(turn_id);
+
     let result = state
         .runtime
-        .approve_tool(
-            deepomni_protocol::id::ThreadId::from_string(thread_id),
-            deepomni_protocol::id::TurnId::from_string(turn_id),
-        )
+        .approve_tool(tid, tuid)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -253,9 +266,14 @@ async fn reject_tool(
 }
 
 async fn interrupt_turn(
-    State(_state): State<Arc<AppState>>,
-    Path((_thread_id, _turn_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+    Path((thread_id, _turn_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let tid = ThreadId::from_string(thread_id);
+    let _ = state
+        .runtime
+        .try_submit_op(deepomni_protocol::op::Op::Cancel { thread_id: tid })
+        .await;
     Ok(Json(serde_json::json!({
         "status": "interrupted"
     })))
@@ -325,24 +343,42 @@ async fn stream_events(
 }
 
 async fn list_tools(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    Ok(Json(serde_json::json!({
-        "tools": ["read_file", "write_file", "edit_file", "grep", "list_files",
-                    "shell_exec", "git_status", "git_diff", "git_apply", "todo_update"]
-    })))
+    let registry = state.runtime.tool_registry();
+    let specs = registry.list_specs().await;
+    let tools: Vec<serde_json::Value> = specs
+        .iter()
+        .map(|spec| match spec {
+            deepomni_protocol::tool::ToolSpec::Function(details) => {
+                serde_json::json!({
+                    "name": details.name,
+                    "description": details.description,
+                })
+            }
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "tools": tools })))
 }
 
 async fn list_skills(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    Ok(Json(serde_json::json!({ "skills": [] })))
+    let manager = state.runtime.session_services().skill_manager.clone();
+    let guard = manager.read().await;
+    let skills = guard.list();
+    let names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+    Ok(Json(serde_json::json!({ "skills": names })))
 }
 
 async fn list_plugins(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    Ok(Json(serde_json::json!({ "plugins": [] })))
+    let manager = state.runtime.session_services().plugin_manager.clone();
+    let guard = manager.read().await;
+    let plugins = guard.list_enabled();
+    let names: Vec<String> = plugins.iter().map(|p| p.manifest.id.clone()).collect();
+    Ok(Json(serde_json::json!({ "plugins": names })))
 }
 
 // ── Server launcher ──

@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
-use deepomni_protocol::id::{MessageId, SubagentId, ThreadId, ToolCallId, TurnId};
 use deepomni_protocol::EventFrame;
+use deepomni_protocol::id::{MessageId, SubagentId, ThreadId, ToolCallId, TurnId};
 
 /// The internal source of truth for everything that happens in a turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +57,7 @@ pub enum JournalEntry {
     },
     ToolCallCompleted {
         call_id: ToolCallId,
+        tool_name: String,
         success: bool,
         output: Option<String>,
         output_preview: Option<String>,
@@ -96,6 +97,9 @@ pub enum JournalEntry {
     },
     ContextCompactionStarted,
     ContextCompactionCompleted,
+    TurnInterrupted {
+        reason: String,
+    },
     ProviderUsage {
         prompt_tokens: u64,
         completion_tokens: u64,
@@ -162,6 +166,10 @@ pub fn journal_to_event_frame(record: &JournalRecord) -> Option<EventFrame> {
         JournalEntry::TurnCompleted => Some(EventFrame::TurnCompleted {
             turn_id: record.turn_id.clone(),
         }),
+        JournalEntry::TurnInterrupted { .. } => Some(EventFrame::TurnInterrupted {
+            thread_id: record.thread_id.clone(),
+            turn_id: record.turn_id.clone(),
+        }),
         JournalEntry::TurnFailed { error } => Some(EventFrame::TurnFailed {
             turn_id: record.turn_id.clone(),
             error: error.clone(),
@@ -200,9 +208,7 @@ pub fn journal_to_event_frame(record: &JournalRecord) -> Option<EventFrame> {
             visibility: deepomni_protocol::event::ReasoningVisibility::HostRenderable,
         }),
         JournalEntry::ToolCallRequested {
-            call_id,
-            tool_name,
-            ..
+            call_id, tool_name, ..
         } => Some(EventFrame::ToolCallStarted {
             turn_id: record.turn_id.clone(),
             call_id: call_id.clone(),
@@ -225,12 +231,14 @@ pub fn journal_to_event_frame(record: &JournalRecord) -> Option<EventFrame> {
         }),
         JournalEntry::ToolCallCompleted {
             call_id,
+            tool_name,
             success,
             output_preview,
             ..
         } => Some(EventFrame::ToolCallCompleted {
             turn_id: record.turn_id.clone(),
             call_id: call_id.clone(),
+            tool_name: tool_name.clone(),
             success: *success,
             output_preview: output_preview.clone(),
         }),

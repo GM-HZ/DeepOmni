@@ -1,19 +1,24 @@
-//! Engine-layer session and turn state primitives.
+//! # DeepOmni Engine
 //!
-//! This crate owns the decomposition boundary between the SDK-facing runtime
-//! facade and the turn machinery. Runtime still delegates most behavior while
-//! journal migration settles; these types provide the stable FSM/container
-//! surface for moving code out of `deepomni-runtime`.
+//! Session/Turn state machine, RequestCompiler, and approval coordination.
+//! The engine is the single authority for turn lifecycle.
 
+pub mod agent_control;
 pub mod approval;
+pub mod compaction;
+pub mod mailbox;
 pub mod request_compiler;
 pub mod session;
-pub mod tool_transaction;
+pub mod session_loop;
+pub mod turn_coordinator;
 pub mod turn_fsm;
 
-pub use approval::{ApprovalCoordinator, ApprovalOutcome};
-pub use request_compiler::EngineRequestCompiler;
-pub use session::{Session, SessionId, SessionManager, SessionState};
-pub use tool_transaction::ToolTransactionEngine;
-pub use turn_fsm::{TurnState, TurnStateMachine};
-
+pub use agent_control::{AgentControl, AgentRegistry};
+pub use approval::ApprovalCoordinator;
+pub use compaction::CompactionTracker;
+pub use mailbox::{Mailbox, MailboxReceiver};
+pub use request_compiler::{CompileConfig, CompiledRequest, RequestCompiler};
+pub use session::SessionManager;
+pub use session_loop::{OpHandler, SessionLoop, SessionLoopHandle};
+pub use turn_coordinator::{TurnCoordinator, TurnOpResult, TurnServices};
+pub use turn_fsm::{TurnFsmError, TurnState, TurnStateMachine};

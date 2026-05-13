@@ -1,85 +1,126 @@
+//! SessionManager — per-thread session lifecycle. One session = one thread.
+//! Phase B: Uses real SessionLoopHandle instead of dummy channels.
+//! The canonical Op type is `deepomni_protocol::op::Op`.
+
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
-use deepomni_context::ContextManager;
-use deepomni_protocol::id::{ThreadId, TurnId};
-use deepomni_tools::ApprovalStore;
+use crate::session_loop::{SessionLoopError, SessionLoopHandle};
+use deepomni_protocol::id::ThreadId;
+use deepomni_protocol::op::{Op, SubmissionId};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SessionId(pub String);
-
-#[derive(Debug, Clone)]
-pub struct Session {
-    pub id: SessionId,
-    pub thread_id: ThreadId,
-    pub state: SessionState,
-}
-
-#[derive(Debug, Clone)]
-pub struct SessionState {
-    pub context_manager: ContextManager,
-    pub active_turn_id: Option<TurnId>,
-    pub approval_store: std::sync::Arc<ApprovalStore>,
-}
-
-impl SessionState {
-    pub fn new() -> Self {
-        Self {
-            context_manager: ContextManager::new(),
-            active_turn_id: None,
-            approval_store: std::sync::Arc::new(ApprovalStore::new()),
-        }
-    }
-}
-
-impl Default for SessionState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[derive(Debug, Default)]
+/// Manages active sessions, one per thread.
 pub struct SessionManager {
-    sessions: HashMap<SessionId, Session>,
+    sessions: RwLock<HashMap<ThreadId, SessionHandle>>,
+}
+
+/// Handle to an active session. Holds the background SessionLoopHandle.
+#[derive(Clone)]
+pub struct SessionHandle {
+    pub thread_id: ThreadId,
+    pub session_loop: Arc<SessionLoopHandle>,
 }
 
 impl SessionManager {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            sessions: RwLock::new(HashMap::new()),
+        }
     }
 
-    pub fn insert(&mut self, session: Session) {
-        self.sessions.insert(session.id.clone(), session);
+    /// Register a new session for a thread with its SessionLoopHandle.
+    pub async fn register(&self, thread_id: ThreadId, session_loop: Arc<SessionLoopHandle>) {
+        self.sessions.write().await.insert(
+            thread_id.clone(),
+            SessionHandle {
+                thread_id,
+                session_loop,
+            },
+        );
     }
 
-    pub fn get(&self, id: &SessionId) -> Option<&Session> {
-        self.sessions.get(id)
+    /// Remove a session when the thread is archived.
+    pub async fn remove(&self, thread_id: &ThreadId) {
+        self.sessions.write().await.remove(thread_id);
     }
 
-    pub fn len(&self) -> usize {
-        self.sessions.len()
+    /// Check if a thread has an active session.
+    pub async fn has(&self, thread_id: &ThreadId) -> bool {
+        self.sessions.read().await.contains_key(thread_id)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.sessions.is_empty()
+    /// Submit an Op to the session's loop and return a SubmissionId.
+    pub async fn submit_to(
+        &self,
+        thread_id: &ThreadId,
+        op: Op,
+    ) -> Result<SubmissionId, SessionLoopError> {
+        let guard = self.sessions.read().await;
+        let handle = guard.get(thread_id).ok_or(SessionLoopError::Closed)?;
+        handle.session_loop.submit(op)
+    }
+}
+
+impl Default for SessionManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::OpHandler;
+    use crate::session_loop::SessionLoop;
+    use tokio::sync::mpsc;
 
-    #[test]
-    fn session_manager_tracks_sessions() {
-        let mut manager = SessionManager::new();
-        let id = SessionId("s1".into());
-        manager.insert(Session {
-            id: id.clone(),
-            thread_id: ThreadId::new(),
-            state: SessionState::new(),
-        });
+    struct TestHandler {
+        tx: mpsc::UnboundedSender<String>,
+    }
 
-        assert_eq!(manager.len(), 1);
-        assert!(manager.get(&id).is_some());
+    #[async_trait::async_trait]
+    impl OpHandler for TestHandler {
+        async fn handle_op(&self, submission: deepomni_protocol::op::Submission) {
+            let _ = self.tx.send(match &submission.op {
+                Op::Cancel { .. } => "cancel".into(),
+                Op::Compact { .. } => "compact".into(),
+                _ => "other".into(),
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_register_and_submit() {
+        let mgr = SessionManager::new();
+        let tid = ThreadId::from_string("test-session");
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handler = Arc::new(TestHandler { tx });
+        let loop_handle = Arc::new(SessionLoop::spawn(tid.clone(), handler));
+
+        mgr.register(tid.clone(), loop_handle).await;
+        assert!(mgr.has(&tid).await);
+
+        // Submit through the manager.
+        let sub_id = mgr
+            .submit_to(
+                &tid,
+                Op::Cancel {
+                    thread_id: tid.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!sub_id.as_str().is_empty());
+
+        // Give the handler time to process.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let msg = rx.try_recv().unwrap();
+        assert_eq!(msg, "cancel");
+
+        // Remove the session.
+        mgr.remove(&tid).await;
+        assert!(!mgr.has(&tid).await);
     }
 }
-
