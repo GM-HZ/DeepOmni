@@ -21,5 +21,5 @@ pub use session::SessionManager;
 pub use session_loop::{
     OpHandler, SessionEventReceiver, SessionEventSink, SessionLoop, SessionLoopHandle,
 };
-pub use turn_coordinator::{TurnCoordinator, TurnOpResult, TurnServices};
+pub use turn_coordinator::{TurnCoordinator, TurnOpError, TurnOpResult, TurnServices};
 pub use turn_fsm::{TurnFsmError, TurnState, TurnStateMachine};

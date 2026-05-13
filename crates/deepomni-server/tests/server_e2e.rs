@@ -204,15 +204,30 @@ async fn test_e2e_list_threads_includes_created() {
     );
 }
 
-/// E2E: Interrupt endpoint returns success.
+/// E2E: Interrupt endpoint returns success and submission_id.
 #[tokio::test]
 async fn test_e2e_interrupt_endpoint_returns_ok() {
-    let (app, _) = test_app().await;
+    let (app, runtime) = test_app().await;
+    // Create a real thread so its SessionLoop exists.
+    let thread = runtime
+        .create_thread(deepomni_protocol::CreateThreadRequest {
+            workspace: std::path::PathBuf::from("/tmp/test"),
+            model: None,
+            model_provider: None,
+            name: None,
+            approval_policy: None,
+            sandbox: None,
+            parent_thread_id: None,
+            ephemeral: false,
+        })
+        .await
+        .unwrap();
+    let thread_id = thread.id.to_string();
     let resp = app
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/v1/threads/test-thread/turns/test-turn/interrupt")
+                .uri(format!("/v1/threads/{thread_id}/turns/test-turn/interrupt"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -224,6 +239,10 @@ async fn test_e2e_interrupt_endpoint_returns_ok() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"].as_str().unwrap(), "interrupted");
+    assert!(
+        json["submission_id"].as_str().is_some(),
+        "must return submission_id"
+    );
 }
 
 /// E2E: Create turn via HTTP POST returns real thread_id, turn_id, status.

@@ -270,12 +270,14 @@ async fn interrupt_turn(
     Path((thread_id, _turn_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let tid = ThreadId::from_string(thread_id);
-    let _ = state
+    let sub_id = state
         .runtime
-        .try_submit_op(deepomni_protocol::op::Op::Cancel { thread_id: tid })
-        .await;
+        .submit(deepomni_protocol::op::Op::Cancel { thread_id: tid })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({
-        "status": "interrupted"
+        "status": "interrupted",
+        "submission_id": sub_id.to_string(),
     })))
 }
 

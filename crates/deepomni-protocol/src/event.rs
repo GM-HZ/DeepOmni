@@ -15,32 +15,34 @@ pub struct Event {
     pub msg: EventMsg,
 }
 
-/// Message emitted on the session event queue.
+/// Message emitted on the session event queue. Corresponds to one
+/// lifecycle state of a submission. Pattern from Codex: the event queue
+/// carries the full lifecycle — started → in_progress → completed/failed
+/// — and every event carries the correlated SubmissionId.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventMsg {
-    SubmissionStarted {
-        thread_id: ThreadId,
-    },
-    SubmissionCompleted {
-        thread_id: ThreadId,
-    },
+    /// The session loop accepted the submission and will begin processing.
+    SubmissionStarted { thread_id: ThreadId },
+    /// The handler has started executing the op (post-validation, pre-work).
+    OpStarted { thread_id: ThreadId },
+    /// The handler finished the op successfully with a result payload.
     OpCompleted {
         thread_id: ThreadId,
         turn_id: Option<TurnId>,
         status: String,
         user_input: String,
     },
-    SubmissionFailed {
-        thread_id: ThreadId,
-        error: String,
-    },
-    Frame {
-        thread_id: ThreadId,
-        seq: i64,
-        #[serde(flatten)]
-        frame: EventFrame,
-    },
+    /// The handler encountered an error processing the op.
+    OpFailed { thread_id: ThreadId, error: String },
+    /// The session loop has finished all processing for this submission.
+    SubmissionCompleted { thread_id: ThreadId },
+    /// An event frame projected from the journal. The `frame` field is
+    /// NOT flattened — the EventFrame already carries thread_id and turn_id,
+    /// and flattening would produce duplicate keys on serialization.
+    Frame { seq: i64, frame: EventFrame },
+    /// The session event stream is permanently closed (session ended).
+    StreamClosed { thread_id: ThreadId },
 }
 
 /// A typed frame representing one atom of observable state change.
@@ -281,5 +283,154 @@ mod tests {
         assert_eq!(json["id"], "sub-1");
         assert_eq!(json["msg"]["type"], "submission_completed");
         assert_eq!(json["msg"]["thread_id"], "thread-1");
+    }
+
+    // ── EventMsg snapshot tests ──
+
+    #[test]
+    fn test_event_msg_submission_started_snapshot() {
+        let msg = EventMsg::SubmissionStarted {
+            thread_id: ThreadId::from_string("t1"),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "submission_started");
+        assert_eq!(json["thread_id"], "t1");
+    }
+
+    #[test]
+    fn test_event_msg_op_started_snapshot() {
+        let msg = EventMsg::OpStarted {
+            thread_id: ThreadId::from_string("t1"),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "op_started");
+        assert_eq!(json["thread_id"], "t1");
+    }
+
+    #[test]
+    fn test_event_msg_op_completed_snapshot() {
+        let msg = EventMsg::OpCompleted {
+            thread_id: ThreadId::from_string("t1"),
+            turn_id: Some(TurnId::from_string("turn-1")),
+            status: "completed".into(),
+            user_input: "hello".into(),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "op_completed");
+        assert_eq!(json["thread_id"], "t1");
+        assert_eq!(json["turn_id"], "turn-1");
+        assert_eq!(json["status"], "completed");
+    }
+
+    #[test]
+    fn test_event_msg_op_failed_snapshot() {
+        let msg = EventMsg::OpFailed {
+            thread_id: ThreadId::from_string("t1"),
+            error: "something went wrong".into(),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "op_failed");
+        assert_eq!(json["thread_id"], "t1");
+        assert_eq!(json["error"], "something went wrong");
+    }
+
+    #[test]
+    fn test_event_msg_submission_completed_snapshot() {
+        let msg = EventMsg::SubmissionCompleted {
+            thread_id: ThreadId::from_string("t1"),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "submission_completed");
+        assert_eq!(json["thread_id"], "t1");
+    }
+
+    #[test]
+    fn test_event_msg_frame_snapshot() {
+        let msg = EventMsg::Frame {
+            seq: 42,
+            frame: EventFrame::TurnStarted {
+                thread_id: ThreadId::from_string("t1"),
+                turn_id: TurnId::from_string("turn-1"),
+                user_input: "hi".into(),
+            },
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "frame");
+        assert_eq!(json["seq"], 42);
+        assert_eq!(json["frame"]["event"], "turn_started");
+        assert_eq!(json["frame"]["thread_id"], "t1");
+    }
+
+    #[test]
+    fn test_event_msg_stream_closed_snapshot() {
+        let msg = EventMsg::StreamClosed {
+            thread_id: ThreadId::from_string("t1"),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "stream_closed");
+        assert_eq!(json["thread_id"], "t1");
+    }
+
+    // ── Architecture tests ──
+
+    #[test]
+    fn test_event_id_equals_submission_id() {
+        // Fundamental invariant: Event.id always correlates to Submission.id.
+        let sub_id = SubmissionId("sub-corr-1".into());
+        let event = Event {
+            id: sub_id.clone(),
+            msg: EventMsg::OpCompleted {
+                thread_id: ThreadId::from_string("t"),
+                turn_id: None,
+                status: "ok".into(),
+                user_input: String::new(),
+            },
+        };
+        assert_eq!(event.id, sub_id);
+    }
+
+    #[test]
+    fn test_all_event_msg_variants_roundtrip() {
+        let variants: Vec<EventMsg> = vec![
+            EventMsg::SubmissionStarted {
+                thread_id: ThreadId::from_string("t"),
+            },
+            EventMsg::OpStarted {
+                thread_id: ThreadId::from_string("t"),
+            },
+            EventMsg::OpCompleted {
+                thread_id: ThreadId::from_string("t"),
+                turn_id: Some(TurnId::from_string("turn-1")),
+                status: "completed".into(),
+                user_input: "hello".into(),
+            },
+            EventMsg::OpFailed {
+                thread_id: ThreadId::from_string("t"),
+                error: "fail".into(),
+            },
+            EventMsg::SubmissionCompleted {
+                thread_id: ThreadId::from_string("t"),
+            },
+            EventMsg::Frame {
+                seq: 1,
+                frame: EventFrame::TurnStarted {
+                    thread_id: ThreadId::from_string("t"),
+                    turn_id: TurnId::from_string("turn-1"),
+                    user_input: "hi".into(),
+                },
+            },
+            EventMsg::StreamClosed {
+                thread_id: ThreadId::from_string("t"),
+            },
+        ];
+
+        for msg in variants {
+            let json = serde_json::to_string(&msg).unwrap();
+            let rt: EventMsg = serde_json::from_str(&json)
+                .unwrap_or_else(|_| panic!("roundtrip failed for variant, json={json}"));
+            // verify serialized form roundtrips to the same JSON
+            let json2 = serde_json::to_string(&rt).unwrap();
+            assert_eq!(json, json2, "roundtrip mismatch");
+        }
     }
 }

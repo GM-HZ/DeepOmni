@@ -28,8 +28,8 @@ use deepomni_policy::{AgentMode, PermissionProfile, PolicyEngine};
 use deepomni_protocol::id::{ThreadId, ToolCallId, TurnId};
 use deepomni_protocol::op::{Op, SubmissionId};
 use deepomni_protocol::{
-    CreateThreadRequest, CreateTurnRequest, EventFrame, SessionSource, Thread, ThreadStatus, Turn,
-    TurnStatus,
+    CreateThreadRequest, CreateTurnRequest, Event, EventFrame, EventMsg, SessionSource, Thread,
+    ThreadStatus, Turn, TurnStatus,
 };
 use deepomni_state::StateStore;
 use deepomni_tools::{ApprovalStore, ToolRegistry};
@@ -71,9 +71,6 @@ struct RuntimeInner {
     subagent_registry: RwLock<HashMap<String, SubagentState>>,
     /// Phase G: Journal→EventBus projection service (extracted from runtime).
     projection_service: Arc<projection::ProjectionService>,
-    /// Pending submission responses. Keyed by SubmissionId; the sender
-    /// is notified when the SessionLoop processes the submission.
-    submission_replies: RwLock<HashMap<SubmissionId, oneshot::Sender<TurnOpResult>>>,
     /// Phase 5: Multi-agent control for parent-child agent communication.
     agent_control: Arc<AgentControl>,
 }
@@ -304,7 +301,6 @@ impl RuntimeBuilder {
                     state_for_projection,
                     event_bus_for_projection,
                 )),
-                submission_replies: RwLock::new(HashMap::new()),
                 agent_control: Arc::new(AgentControl::new(16, 4)),
             }),
         })
@@ -545,45 +541,24 @@ impl Runtime {
 
     /// Start and execute a turn on a thread.
     ///
-    /// When the thread has a SessionLoop, the turn is dispatched through the
-    /// loop for ordered execution. Falls back to direct execution for threads
-    /// without a loop (legacy / test paths).
+    /// When the thread has a SessionLoop, dispatched through submit_and_wait
+    /// which consumes the session event queue. Falls back to direct execution
+    /// for threads without a loop (test paths).
     pub async fn submit_turn(
         &self,
         thread_id: ThreadId,
         request: CreateTurnRequest,
     ) -> Result<Turn, RuntimeError> {
-        // Phase 1: Try the SessionLoop path first.
-        let loop_handle = self.inner.session_manager.get_handle(&thread_id).await;
-        if let Some(handle) = loop_handle {
-            return self.submit_turn_via_loop(handle, thread_id, request).await;
-        }
-
-        // Fallback: direct execution for threads without a SessionLoop.
-        self.submit_turn_direct(thread_id, request).await
-    }
-
-    /// Submit a turn through the SessionLoop and wait for the result.
-    async fn submit_turn_via_loop(
-        &self,
-        handle: Arc<deepomni_engine::SessionLoopHandle>,
-        thread_id: ThreadId,
-        request: CreateTurnRequest,
-    ) -> Result<Turn, RuntimeError> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        // Register reply BEFORE submitting to avoid race: the handler may
-        // process before we insert, missing the reply sender.
-        let submission_id = SubmissionId::new();
-        self.inner
-            .submission_replies
-            .write()
+        // Try event-queue path via submit_and_wait.
+        if self
+            .inner
+            .session_manager
+            .get_handle(&thread_id)
             .await
-            .insert(submission_id.clone(), reply_tx);
-
-        if handle
-            .submit_with_id(
-                submission_id.clone(),
-                Op::UserInput {
+            .is_some()
+        {
+            let result = self
+                .submit_and_wait(Op::UserInput {
                     thread_id: thread_id.clone(),
                     input: vec![deepomni_protocol::op::UserInput::Text {
                         text: request.input.clone(),
@@ -592,23 +567,81 @@ impl Runtime {
                         model: request.model.clone(),
                         ..Default::default()
                     },
-                },
-            )
-            .is_err()
-        {
-            // Clean up pre-registered reply sender on failure (prevents leak).
-            self.inner
-                .submission_replies
-                .write()
-                .await
-                .remove(&submission_id);
-            return Err(RuntimeError::NotReady("session loop closed".into()));
+                })
+                .await?;
+            return turn_op_result_to_turn(result);
         }
 
-        let op_result = reply_rx
+        // Fallback: direct execution for threads without a SessionLoop.
+        self.submit_turn_direct(thread_id, request).await
+    }
+
+    /// Submit an Op through the SessionLoop and wait for the correlated
+    /// OpCompleted or OpFailed event on the session event queue.
+    ///
+    /// This is the ONLY synchronous-wait path in the Runtime. It does NOT
+    /// use oneshot channels or reply maps — it consumes the event queue.
+    pub async fn submit_and_wait(&self, op: Op) -> Result<TurnOpResult, RuntimeError> {
+        let thread_id = op_thread_id(&op);
+
+        // Take the event receiver for the duration of the wait.
+        let mut events = self
+            .inner
+            .session_manager
+            .take_event_receiver(&thread_id)
             .await
-            .map_err(|_| RuntimeError::NotReady("session loop dropped".into()))?;
-        turn_op_result_to_turn(op_result)
+            .ok_or_else(|| RuntimeError::NotReady("no session for thread".into()))?;
+
+        // Submit the op.
+        let sub_id = self
+            .inner
+            .session_manager
+            .submit_to(&thread_id, op)
+            .await
+            .map_err(|_| RuntimeError::NotReady("session loop closed".into()))?;
+
+        // Consume events until we find a correlated OpCompleted or OpFailed.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(300), async {
+            loop {
+                match events.recv().await {
+                    Some(Event { id, msg }) if id == sub_id => match msg {
+                        EventMsg::OpCompleted {
+                            thread_id,
+                            turn_id,
+                            status,
+                            user_input,
+                        } => {
+                            return Ok(TurnOpResult {
+                                thread_id,
+                                turn_id,
+                                status,
+                                user_input,
+                            });
+                        }
+                        EventMsg::OpFailed { thread_id, error } => {
+                            return Err(RuntimeError::TurnOp(thread_id, error));
+                        }
+                        _ => continue, // SubmissionStarted, OpStarted, Frame — continue waiting
+                    },
+                    Some(_) => continue, // not our submission
+                    None => {
+                        return Err(RuntimeError::NotReady(
+                            "event stream closed before op completed".into(),
+                        ));
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| RuntimeError::NotReady("submit_and_wait timed out".into()))??;
+
+        // Return the receiver so other consumers can use it.
+        self.inner
+            .session_manager
+            .return_event_receiver(&thread_id, events)
+            .await;
+
+        Ok(result)
     }
 
     /// Direct turn execution (fallback when no SessionLoop exists).
@@ -1061,20 +1094,7 @@ impl Runtime {
             .await
     }
 
-    /// Best-effort Op submission through the thread's SessionLoop.
-    /// Returns immediately. Falls back silently if no loop exists.
-    pub async fn try_submit_op(
-        &self,
-        op: deepomni_protocol::op::Op,
-    ) -> Option<deepomni_protocol::op::SubmissionId> {
-        let thread_id = op_thread_id(&op);
-        self.inner
-            .session_manager
-            .submit_to(&thread_id, op)
-            .await
-            .ok()
-    }
-
+    // try_submit_op removed — use submit() or submit_and_wait() instead.
     /// List threads from durable state.
     pub fn list_threads(&self) -> Result<Vec<deepomni_state::ThreadRecord>, RuntimeError> {
         self.inner
@@ -1165,53 +1185,30 @@ impl Runtime {
 
     /// Approve a pending tool call and resume the turn.
     ///
-    /// Routes through SessionLoop when available for ordered execution.
+    /// Routes through submit_and_wait (event queue) when SessionLoop exists.
+    /// Falls back to direct execution for threads without a loop.
     pub async fn approve_tool(
         &self,
         thread_id: ThreadId,
         turn_id: TurnId,
     ) -> Result<Turn, RuntimeError> {
-        // Phase 1/2: Try the SessionLoop path first.
-        let loop_handle = self.inner.session_manager.get_handle(&thread_id).await;
-        if let Some(handle) = loop_handle {
-            // Resolve pending approval FIRST to get the real approval_id
-            // (not the turn_id). ToolOrchestrator generates a random
-            // "approval-..." that the handler needs for lookup.
+        // Try event-queue path via submit_and_wait.
+        if self
+            .inner
+            .session_manager
+            .get_handle(&thread_id)
+            .await
+            .is_some()
+        {
             let pending = self.resolve_pending_approval(&thread_id, &turn_id).await?;
-            let real_approval_id = pending.approval_id.clone();
-
-            let (reply_tx, reply_rx) = oneshot::channel();
-            // Register reply BEFORE submit (race fix).
-            let submission_id = SubmissionId::new();
-            self.inner
-                .submission_replies
-                .write()
-                .await
-                .insert(submission_id.clone(), reply_tx);
-
-            if handle
-                .submit_with_id(
-                    submission_id.clone(),
-                    Op::ApprovalDecision {
-                        thread_id: thread_id.clone(),
-                        approval_id: real_approval_id.clone(),
-                        approved: true,
-                    },
-                )
-                .is_err()
-            {
-                self.inner
-                    .submission_replies
-                    .write()
-                    .await
-                    .remove(&submission_id);
-                return Err(RuntimeError::NotReady("session loop closed".into()));
-            }
-
-            let op_result = reply_rx
-                .await
-                .map_err(|_| RuntimeError::NotReady("session loop dropped".into()))?;
-            return turn_op_result_to_turn(op_result);
+            let result = self
+                .submit_and_wait(Op::ApprovalDecision {
+                    thread_id: thread_id.clone(),
+                    approval_id: pending.approval_id.clone(),
+                    approved: true,
+                })
+                .await?;
+            return turn_op_result_to_turn(result);
         }
 
         // Fallback: direct execution for threads without a SessionLoop.
@@ -1339,51 +1336,30 @@ impl Runtime {
 
     /// Reject a pending tool call and fail the turn.
     ///
-    /// Routes through SessionLoop when available for ordered execution.
+    /// Routes through submit_and_wait (event queue) when SessionLoop exists.
+    /// Falls back to direct execution for threads without a loop.
     pub async fn reject_tool(
         &self,
         thread_id: ThreadId,
         turn_id: TurnId,
     ) -> Result<Turn, RuntimeError> {
-        // Phase 1/2: Try the SessionLoop path first.
-        let loop_handle = self.inner.session_manager.get_handle(&thread_id).await;
-        if let Some(handle) = loop_handle {
-            // Resolve pending to get real approval_id (not turn_id).
+        // Try event-queue path via submit_and_wait.
+        if self
+            .inner
+            .session_manager
+            .get_handle(&thread_id)
+            .await
+            .is_some()
+        {
             let pending = self.resolve_pending_approval(&thread_id, &turn_id).await?;
-            let real_approval_id = pending.approval_id.clone();
-
-            let (reply_tx, reply_rx) = oneshot::channel();
-            // Register reply BEFORE submit (race fix).
-            let submission_id = SubmissionId::new();
-            self.inner
-                .submission_replies
-                .write()
-                .await
-                .insert(submission_id.clone(), reply_tx);
-
-            if handle
-                .submit_with_id(
-                    submission_id.clone(),
-                    Op::ApprovalDecision {
-                        thread_id: thread_id.clone(),
-                        approval_id: real_approval_id,
-                        approved: false,
-                    },
-                )
-                .is_err()
-            {
-                self.inner
-                    .submission_replies
-                    .write()
-                    .await
-                    .remove(&submission_id);
-                return Err(RuntimeError::NotReady("session loop closed".into()));
-            }
-
-            let op_result = reply_rx
-                .await
-                .map_err(|_| RuntimeError::NotReady("session loop dropped".into()))?;
-            return turn_op_result_to_turn(op_result);
+            let result = self
+                .submit_and_wait(Op::ApprovalDecision {
+                    thread_id: thread_id.clone(),
+                    approval_id: pending.approval_id,
+                    approved: false,
+                })
+                .await?;
+            return turn_op_result_to_turn(result);
         }
 
         // Fallback: direct execution.
@@ -1836,6 +1812,8 @@ pub enum RuntimeError {
     ThreadNotFound(ThreadId),
     InvalidTransition(String),
     NotReady(String),
+    /// An op dispatched via submit_and_wait failed. Carries the thread and error.
+    TurnOp(ThreadId, String),
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -1846,6 +1824,9 @@ impl std::fmt::Display for RuntimeError {
             RuntimeError::ThreadNotFound(id) => write!(f, "thread not found: {id}"),
             RuntimeError::InvalidTransition(msg) => write!(f, "invalid state transition: {msg}"),
             RuntimeError::NotReady(msg) => write!(f, "runtime not ready: {msg}"),
+            RuntimeError::TurnOp(thread_id, msg) => {
+                write!(f, "turn op error for {thread_id}: {msg}")
+            }
         }
     }
 }
@@ -2265,14 +2246,20 @@ mod tests {
             .unwrap();
 
         let started = events.recv().await.unwrap();
+        let op_started = events.recv().await.unwrap();
         let op_completed = events.recv().await.unwrap();
         let completed = events.recv().await.unwrap();
         assert_eq!(started.id, sub_id);
+        assert_eq!(op_started.id, sub_id);
         assert_eq!(op_completed.id, sub_id);
         assert_eq!(completed.id, sub_id);
         assert!(matches!(
             started.msg,
             EventMsg::SubmissionStarted { ref thread_id } if thread_id == &thread.id
+        ));
+        assert!(matches!(
+            op_started.msg,
+            EventMsg::OpStarted { ref thread_id } if thread_id == &thread.id
         ));
         assert!(matches!(
             op_completed.msg,
@@ -2372,14 +2359,11 @@ mod tests {
 
         // try_submit_op on a thread with a SessionLoop returns a submission id.
         let sub_id = runtime
-            .try_submit_op(Op::Cancel {
+            .submit(Op::Cancel {
                 thread_id: thread.id.clone(),
             })
             .await;
-        assert!(
-            sub_id.is_some(),
-            "try_submit_op must return a submission id"
-        );
+        assert!(sub_id.is_ok(), "submit must return a submission id");
         assert!(!sub_id.unwrap().as_str().is_empty());
     }
 
@@ -2579,11 +2563,11 @@ mod tests {
 
         // Send Cancel Op through SessionLoop — accepted even without active turn.
         let sub_id = runtime
-            .try_submit_op(Op::Cancel {
+            .submit(Op::Cancel {
                 thread_id: thread.id.clone(),
             })
             .await;
-        assert!(sub_id.is_some(), "cancel op must return a submission id");
+        assert!(sub_id.is_ok(), "cancel op must return a submission id");
 
         // Give handler time to process.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -2632,7 +2616,7 @@ mod tests {
 
         // Send Compact Op through SessionLoop.
         let _ = runtime
-            .try_submit_op(Op::Compact {
+            .submit(Op::Compact {
                 thread_id: thread.id.clone(),
             })
             .await;

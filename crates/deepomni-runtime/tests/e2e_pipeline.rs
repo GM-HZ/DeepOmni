@@ -597,16 +597,16 @@ async fn test_e2e_steer_input_via_session_loop() {
         .await
         .unwrap();
 
-    // SteerInput should return NotReady when no active turn exists.
+    // SteerInput should be accepted.
     let result = runtime
-        .try_submit_op(Op::SteerInput {
+        .submit(Op::SteerInput {
             thread_id: thread.id.clone(),
             input: vec![UserInput::Text {
                 text: "correct the path".into(),
             }],
         })
         .await;
-    assert!(result.is_some(), "steer input should be accepted");
+    assert!(result.is_ok(), "steer input should be accepted");
 }
 
 /// E2E: Compaction Op processes through SessionLoop and writes journal entries.
@@ -634,11 +634,11 @@ async fn test_e2e_compact_op_via_session_loop() {
 
     // Submit a compaction Op.
     let result = runtime
-        .try_submit_op(Op::Compact {
+        .submit(Op::Compact {
             thread_id: thread.id.clone(),
         })
         .await;
-    assert!(result.is_some(), "compact op should be accepted");
+    assert!(result.is_ok(), "compact op should be accepted");
 }
 
 /// E2E: Cancel Op terminates active turn.
@@ -666,11 +666,11 @@ async fn test_e2e_cancel_op_terminates_turn() {
 
     // Cancel should be accepted even without an active turn.
     let sub_id = runtime
-        .try_submit_op(Op::Cancel {
+        .submit(Op::Cancel {
             thread_id: thread.id.clone(),
         })
         .await;
-    assert!(sub_id.is_some(), "cancel op must return a submission id");
+    assert!(sub_id.is_ok(), "cancel op must return a submission id");
 }
 
 /// E2E: ContextManager multi-turn — second turn context includes first turn history.

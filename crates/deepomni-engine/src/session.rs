@@ -72,13 +72,27 @@ impl SessionManager {
             .map(|h| Arc::clone(&h.session_loop))
     }
 
-    /// Take ownership of the session event receiver.
+    /// Take ownership of the session event receiver. Single-consumer: after
+    /// taking, nobody else can read events until the receiver is returned.
     pub async fn take_event_receiver(&self, thread_id: &ThreadId) -> Option<SessionEventReceiver> {
         let events = {
             let guard = self.sessions.read().await;
             guard.get(thread_id).map(|h| Arc::clone(&h.events))?
         };
         events.write().await.take()
+    }
+
+    /// Return the event receiver to the session so other consumers can use it.
+    pub async fn return_event_receiver(
+        &self,
+        thread_id: &ThreadId,
+        receiver: SessionEventReceiver,
+    ) {
+        let guard = self.sessions.read().await;
+        if let Some(handle) = guard.get(thread_id) {
+            let mut events = handle.events.write().await;
+            *events = Some(receiver);
+        }
     }
 
     /// Submit an Op to the session's loop and return a SubmissionId.

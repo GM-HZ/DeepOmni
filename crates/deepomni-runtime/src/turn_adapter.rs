@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use deepomni_engine::{TurnOpResult, TurnServices};
+use deepomni_engine::{TurnOpError, TurnOpResult, TurnServices};
 use deepomni_journal::JournalEntry;
 use deepomni_protocol::id::{ThreadId, TurnId};
 use deepomni_protocol::op::SubmissionId;
@@ -10,6 +10,10 @@ use super::{Runtime, RuntimeError, RuntimeInner};
 
 /// Thin adapter implementing TurnServices so the engine's TurnCoordinator can
 /// dispatch ops to Runtime's low-level service methods.
+///
+/// The adapter returns Result<TurnOpResult, TurnOpError> — the coordinator
+/// writes the outcome to the session event queue. There is no side-channel
+/// (oneshot, reply map) for result delivery.
 pub(super) struct RuntimeTurnAdapter {
     pub(super) inner: Arc<RuntimeInner>,
 }
@@ -34,30 +38,17 @@ impl RuntimeTurnAdapter {
     }
 
     fn turn_result_to_op_result(
-        &self,
         thread_id: &ThreadId,
         result: Result<Turn, RuntimeError>,
-    ) -> TurnOpResult {
+    ) -> Result<TurnOpResult, TurnOpError> {
         match result {
-            Ok(turn) => TurnOpResult {
+            Ok(turn) => Ok(TurnOpResult {
                 thread_id: thread_id.clone(),
                 turn_id: Some(turn.id),
                 status: Self::turn_status_to_op_status(&turn.status),
                 user_input: turn.user_input,
-            },
-            Err(e) => TurnOpResult::err(thread_id.clone(), format!("error: {e}")),
-        }
-    }
-
-    async fn deliver_reply(&self, submission_id: SubmissionId, result: TurnOpResult) {
-        if let Some(reply_tx) = self
-            .inner
-            .submission_replies
-            .write()
-            .await
-            .remove(&submission_id)
-        {
-            let _ = reply_tx.send(result);
+            }),
+            Err(e) => Err(TurnOpError::new(thread_id.clone(), format!("error: {e}"))),
         }
     }
 }
@@ -69,8 +60,8 @@ impl TurnServices for RuntimeTurnAdapter {
         thread_id: ThreadId,
         text: String,
         model: Option<String>,
-        submission_id: SubmissionId,
-    ) -> TurnOpResult {
+        _submission_id: SubmissionId,
+    ) -> Result<TurnOpResult, TurnOpError> {
         let rt = self.runtime();
         let result = rt
             .submit_turn_direct(
@@ -84,9 +75,7 @@ impl TurnServices for RuntimeTurnAdapter {
                 },
             )
             .await;
-        let op_result = self.turn_result_to_op_result(&thread_id, result);
-        self.deliver_reply(submission_id, op_result.clone()).await;
-        op_result
+        Self::turn_result_to_op_result(&thread_id, result)
     }
 
     async fn handle_approval(
@@ -94,8 +83,8 @@ impl TurnServices for RuntimeTurnAdapter {
         thread_id: ThreadId,
         approval_id: String,
         approved: bool,
-        submission_id: SubmissionId,
-    ) -> TurnOpResult {
+        _submission_id: SubmissionId,
+    ) -> Result<TurnOpResult, TurnOpError> {
         let rt = self.runtime();
         let pending = rt
             .inner
@@ -114,16 +103,14 @@ impl TurnServices for RuntimeTurnAdapter {
                 "no pending approval for {approval_id}"
             ))),
         };
-        let op_result = self.turn_result_to_op_result(&thread_id, result);
-        self.deliver_reply(submission_id, op_result.clone()).await;
-        op_result
+        Self::turn_result_to_op_result(&thread_id, result)
     }
 
     async fn handle_cancel(
         &self,
         thread_id: ThreadId,
-        submission_id: SubmissionId,
-    ) -> TurnOpResult {
+        _submission_id: SubmissionId,
+    ) -> Result<TurnOpResult, TurnOpError> {
         let rt = self.runtime();
         let active_threads = rt.inner.active_threads.read().await;
         if let Some(active) = active_threads.get(&thread_id)
@@ -137,16 +124,14 @@ impl TurnServices for RuntimeTurnAdapter {
                 },
             );
         }
-        let op_result = TurnOpResult::ok(thread_id, None, "interrupted");
-        self.deliver_reply(submission_id, op_result.clone()).await;
-        op_result
+        Ok(TurnOpResult::ok(thread_id, None, "interrupted"))
     }
 
     async fn handle_compact(
         &self,
         thread_id: ThreadId,
-        submission_id: SubmissionId,
-    ) -> TurnOpResult {
+        _submission_id: SubmissionId,
+    ) -> Result<TurnOpResult, TurnOpError> {
         let rt = self.runtime();
         let mut threads = rt.inner.active_threads.write().await;
         match threads.get_mut(&thread_id) {
@@ -179,15 +164,9 @@ impl TurnServices for RuntimeTurnAdapter {
                 active
                     .compaction_tracker
                     .record_success(before as u64, after as u64);
-                let op_result = TurnOpResult::ok(thread_id, None, "completed");
-                self.deliver_reply(submission_id, op_result.clone()).await;
-                op_result
+                Ok(TurnOpResult::ok(thread_id, None, "completed"))
             }
-            None => {
-                let op_result = TurnOpResult::err(thread_id, "error: thread not found".into());
-                self.deliver_reply(submission_id, op_result.clone()).await;
-                op_result
-            }
+            None => Err(TurnOpError::new(thread_id, "thread not found")),
         }
     }
 
@@ -195,8 +174,8 @@ impl TurnServices for RuntimeTurnAdapter {
         &self,
         thread_id: ThreadId,
         steer_text: String,
-        submission_id: SubmissionId,
-    ) -> TurnOpResult {
+        _submission_id: SubmissionId,
+    ) -> Result<TurnOpResult, TurnOpError> {
         let rt = self.runtime();
         let active_threads = rt.inner.active_threads.read().await;
         if let Some(active) = active_threads.get(&thread_id)
@@ -210,14 +189,16 @@ impl TurnServices for RuntimeTurnAdapter {
                     delta: format!("<steer>{steer_text}</steer>"),
                 },
             );
-            let op_result = TurnOpResult::ok(thread_id, Some(turn_id.clone()), "started");
-            self.deliver_reply(submission_id, op_result.clone()).await;
-            op_result
+            Ok(TurnOpResult::ok(
+                thread_id,
+                Some(turn_id.clone()),
+                "started",
+            ))
         } else {
-            let op_result =
-                TurnOpResult::err(thread_id, "error: no active turn for steer input".into());
-            self.deliver_reply(submission_id, op_result.clone()).await;
-            op_result
+            Err(TurnOpError::new(
+                thread_id,
+                "no active turn for steer input",
+            ))
         }
     }
 }
