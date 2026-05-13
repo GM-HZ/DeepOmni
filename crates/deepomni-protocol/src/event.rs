@@ -6,6 +6,36 @@
 use serde::{Deserialize, Serialize};
 
 use crate::id::{MessageId, SubagentId, ThreadId, ToolCallId, TurnId};
+use crate::op::SubmissionId;
+
+/// Codex-style event envelope emitted by a session loop for one submission.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Event {
+    pub id: SubmissionId,
+    pub msg: EventMsg,
+}
+
+/// Message emitted on the session event queue.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EventMsg {
+    SubmissionStarted {
+        thread_id: ThreadId,
+    },
+    SubmissionCompleted {
+        thread_id: ThreadId,
+    },
+    SubmissionFailed {
+        thread_id: ThreadId,
+        error: String,
+    },
+    Frame {
+        thread_id: ThreadId,
+        seq: i64,
+        #[serde(flatten)]
+        frame: EventFrame,
+    },
+}
 
 /// A typed frame representing one atom of observable state change.
 ///
@@ -230,5 +260,20 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn test_session_event_serializes_with_submission_id() {
+        let event = Event {
+            id: SubmissionId("sub-1".into()),
+            msg: EventMsg::SubmissionCompleted {
+                thread_id: ThreadId::from_string("thread-1"),
+            },
+        };
+
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["id"], "sub-1");
+        assert_eq!(json["msg"]["type"], "submission_completed");
+        assert_eq!(json["msg"]["thread_id"], "thread-1");
     }
 }

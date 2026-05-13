@@ -21,7 +21,7 @@ pub mod usage;
 // Re-exports
 pub use approval::{ApprovalDecision, ApprovalRequest};
 pub use error::ProtocolError;
-pub use event::{EventEnvelope, EventFrame};
+pub use event::{Event, EventEnvelope, EventFrame, EventMsg};
 pub use id::EventSeq;
 pub use id::{MessageId, SubagentId, ThreadId, ToolCallId, TurnId};
 pub use permission::{PermissionProfile, PermissionType};

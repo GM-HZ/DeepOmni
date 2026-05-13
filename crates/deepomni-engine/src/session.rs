@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 
 use crate::session_loop::{SessionLoopError, SessionLoopHandle};
 use deepomni_protocol::id::ThreadId;
-use deepomni_protocol::op::{Op, SubmissionId};
+use deepomni_protocol::op::{Op, SubmissionId, W3cTraceContext};
 
 /// Manages active sessions, one per thread.
 pub struct SessionManager {
@@ -65,9 +65,23 @@ impl SessionManager {
         thread_id: &ThreadId,
         op: Op,
     ) -> Result<SubmissionId, SessionLoopError> {
+        self.submit_to_with_trace(thread_id, op, None).await
+    }
+
+    /// Submit an Op with trace context to the session's loop and return a SubmissionId.
+    pub async fn submit_to_with_trace(
+        &self,
+        thread_id: &ThreadId,
+        op: Op,
+        trace: Option<W3cTraceContext>,
+    ) -> Result<SubmissionId, SessionLoopError> {
         let guard = self.sessions.read().await;
         let handle = guard.get(thread_id).ok_or(SessionLoopError::Closed)?;
-        handle.session_loop.submit(op)
+        let id = SubmissionId::new();
+        handle
+            .session_loop
+            .submit_with_id_and_trace(id.clone(), op, trace)?;
+        Ok(id)
     }
 }
 

@@ -35,6 +35,17 @@ impl std::fmt::Display for SubmissionId {
 pub struct Submission {
     pub id: SubmissionId,
     pub op: Op,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<W3cTraceContext>,
+}
+
+/// W3C trace context carried with a submission.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct W3cTraceContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traceparent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracestate: Option<String>,
 }
 
 /// Structured user input — not a plain string.
@@ -123,5 +134,27 @@ mod tests {
         let a = SubmissionId::new();
         let b = SubmissionId::new();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_submission_serializes_with_trace_context() {
+        let submission = Submission {
+            id: SubmissionId("sub-1".into()),
+            op: Op::Cancel {
+                thread_id: ThreadId::from_string("thread-1"),
+            },
+            trace: Some(W3cTraceContext {
+                traceparent: Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00".into()),
+                tracestate: Some("vendor=value".into()),
+            }),
+        };
+
+        let json = serde_json::to_value(&submission).unwrap();
+        assert_eq!(json["id"], "sub-1");
+        assert_eq!(
+            json["trace"]["traceparent"],
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"
+        );
+        assert_eq!(json["trace"]["tracestate"], "vendor=value");
     }
 }

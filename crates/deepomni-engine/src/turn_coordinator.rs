@@ -199,6 +199,7 @@ mod tests {
                     }],
                     settings: Default::default(),
                 },
+                trace: None,
             })
             .await;
         assert_eq!(rx.try_recv().unwrap(), "user_input:hello");
@@ -210,6 +211,7 @@ mod tests {
                 op: Op::Cancel {
                     thread_id: ThreadId::from_string("t"),
                 },
+                trace: None,
             })
             .await;
         assert_eq!(rx.try_recv().unwrap(), "cancel");
@@ -221,6 +223,7 @@ mod tests {
                 op: Op::Compact {
                     thread_id: ThreadId::from_string("t"),
                 },
+                trace: None,
             })
             .await;
         assert_eq!(rx.try_recv().unwrap(), "compact");
@@ -235,6 +238,7 @@ mod tests {
                         text: "steer me".into(),
                     }],
                 },
+                trace: None,
             })
             .await;
         assert_eq!(rx.try_recv().unwrap(), "steer:steer me");
@@ -248,6 +252,7 @@ mod tests {
                     approval_id: "approval-1".into(),
                     approved: true,
                 },
+                trace: None,
             })
             .await;
         assert_eq!(rx.try_recv().unwrap(), "approval:approval-1:true");
