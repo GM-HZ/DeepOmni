@@ -50,6 +50,15 @@ impl SessionManager {
         self.sessions.read().await.contains_key(thread_id)
     }
 
+    /// Get the SessionLoopHandle for a thread, if registered.
+    pub async fn get_handle(&self, thread_id: &ThreadId) -> Option<Arc<SessionLoopHandle>> {
+        self.sessions
+            .read()
+            .await
+            .get(thread_id)
+            .map(|h| Arc::clone(&h.session_loop))
+    }
+
     /// Submit an Op to the session's loop and return a SubmissionId.
     pub async fn submit_to(
         &self,

@@ -808,9 +808,9 @@ impl Runtime {
             .await
             .insert(submission_id.clone(), reply_tx);
 
-        handle
+        if handle
             .submit_with_id(
-                submission_id,
+                submission_id.clone(),
                 Op::UserInput {
                     thread_id: thread_id.clone(),
                     input: vec![deepomni_protocol::op::UserInput::Text {
@@ -822,7 +822,16 @@ impl Runtime {
                     },
                 },
             )
-            .map_err(|_| RuntimeError::NotReady("session loop closed".into()))?;
+            .is_err()
+        {
+            // Clean up pre-registered reply sender on failure (prevents leak).
+            self.inner
+                .submission_replies
+                .write()
+                .await
+                .remove(&submission_id);
+            return Err(RuntimeError::NotReady("session loop closed".into()));
+        }
 
         let op_result = reply_rx
             .await
@@ -1400,16 +1409,24 @@ impl Runtime {
                 .await
                 .insert(submission_id.clone(), reply_tx);
 
-            handle
+            if handle
                 .submit_with_id(
-                    submission_id,
+                    submission_id.clone(),
                     Op::ApprovalDecision {
                         thread_id: thread_id.clone(),
-                        approval_id: real_approval_id,
+                        approval_id: real_approval_id.clone(),
                         approved: true,
                     },
                 )
-                .map_err(|_| RuntimeError::NotReady("session loop closed".into()))?;
+                .is_err()
+            {
+                self.inner
+                    .submission_replies
+                    .write()
+                    .await
+                    .remove(&submission_id);
+                return Err(RuntimeError::NotReady("session loop closed".into()));
+            }
 
             let op_result = reply_rx
                 .await
@@ -1569,16 +1586,24 @@ impl Runtime {
                 .await
                 .insert(submission_id.clone(), reply_tx);
 
-            handle
+            if handle
                 .submit_with_id(
-                    submission_id,
+                    submission_id.clone(),
                     Op::ApprovalDecision {
                         thread_id: thread_id.clone(),
                         approval_id: real_approval_id,
                         approved: false,
                     },
                 )
-                .map_err(|_| RuntimeError::NotReady("session loop closed".into()))?;
+                .is_err()
+            {
+                self.inner
+                    .submission_replies
+                    .write()
+                    .await
+                    .remove(&submission_id);
+                return Err(RuntimeError::NotReady("session loop closed".into()));
+            }
 
             let op_result = reply_rx
                 .await
