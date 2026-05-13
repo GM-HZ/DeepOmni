@@ -6,7 +6,9 @@
 //!
 //! PRD §7.3, §10.1
 
-use std::collections::{HashMap, HashSet};
+mod projection;
+
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::{Mutex, RwLock, oneshot};
@@ -65,8 +67,8 @@ struct RuntimeInner {
     /// Active sub-agents tracked by subagent_id.
     #[allow(dead_code)]
     subagent_registry: RwLock<HashMap<String, SubagentState>>,
-    /// Threads with an active journal-to-event projection task.
-    journal_projection_threads: RwLock<HashSet<ThreadId>>,
+    /// Phase G: Journal→EventBus projection service (extracted from runtime).
+    projection_service: Arc<projection::ProjectionService>,
     /// Pending submission responses. Keyed by SubmissionId; the sender
     /// is notified when the SessionLoop processes the submission.
     submission_replies: RwLock<HashMap<SubmissionId, oneshot::Sender<TurnOpResult>>>,
@@ -237,6 +239,10 @@ impl RuntimeBuilder {
             trace_writer.clone(),
         );
 
+        // Phase D: TurnRunner uses SubagentSpawner trait internally (defined in agent).
+        // Runtime wiring of the trait comes in a follow-up. For now, spawn_subagent
+        // falls back to direct execution when no spawner is configured.
+
         // Initialize skills from configured paths.
         let mut skill_roots = deepomni_skills::SkillRoots::new();
         for path in &config.skill_paths {
@@ -274,6 +280,8 @@ impl RuntimeBuilder {
             trace_writer: trace_writer.clone(),
         });
 
+        let state_for_projection = state.clone() as Arc<dyn deepomni_journal::TurnJournal>;
+        let event_bus_for_projection = event_bus.clone();
         Ok(Runtime {
             inner: Arc::new(RuntimeInner {
                 config,
@@ -292,7 +300,10 @@ impl RuntimeBuilder {
                 approval_coordinator: Arc::new(ApprovalCoordinator::new()),
                 session_manager: Arc::new(SessionManager::new()),
                 subagent_registry: RwLock::new(HashMap::new()),
-                journal_projection_threads: RwLock::new(HashSet::new()),
+                projection_service: Arc::new(projection::ProjectionService::new(
+                    state_for_projection,
+                    event_bus_for_projection,
+                )),
                 submission_replies: RwLock::new(HashMap::new()),
                 agent_control: Arc::new(AgentControl::new(16, 4)),
             }),
@@ -737,7 +748,10 @@ impl Runtime {
         );
 
         // Start journal-to-event projection for this thread.
-        self.ensure_journal_projection(thread_id.clone()).await;
+        self.inner
+            .projection_service
+            .ensure_projection(thread_id.clone())
+            .await;
 
         // Emit event.
         self.emit_event(
@@ -1309,7 +1323,10 @@ impl Runtime {
 
     /// Subscribe to live events for a thread.
     pub async fn subscribe(&self, thread_id: ThreadId) -> deepomni_events::EventSubscriber {
-        self.ensure_journal_projection(thread_id.clone()).await;
+        self.inner
+            .projection_service
+            .ensure_projection(thread_id.clone())
+            .await;
         self.inner.event_bus.subscribe(thread_id).await
     }
 
@@ -1729,33 +1746,6 @@ impl Runtime {
             .map(|active| active.approval_store.clone())
     }
 
-    async fn ensure_journal_projection(&self, thread_id: ThreadId) {
-        {
-            let mut projected = self.inner.journal_projection_threads.write().await;
-            if !projected.insert(thread_id.clone()) {
-                return;
-            }
-        }
-
-        let mut journal_subscriber = self.inner.state.subscribe(thread_id);
-        let event_bus = self.inner.event_bus.clone();
-        tokio::spawn(async move {
-            loop {
-                match journal_subscriber.recv().await {
-                    Ok(record) => {
-                        if let Some(event) = journal_to_event_frame(&record) {
-                            let _ = event_bus
-                                .emit(record.thread_id.clone(), record.seq, event)
-                                .await;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-    }
-
     fn append_turn_journal(
         &self,
         thread_id: &ThreadId,
@@ -2034,7 +2024,7 @@ fn turn_op_result_to_turn(r: TurnOpResult) -> Result<Turn, RuntimeError> {
         TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Interrupted
     );
     Ok(Turn {
-        id: r.turn_id.unwrap_or_else(TurnId::new),
+        id: r.turn_id.unwrap_or_default(),
         thread_id: r.thread_id,
         status,
         user_input: r.user_input,

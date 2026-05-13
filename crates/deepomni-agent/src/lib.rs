@@ -12,10 +12,28 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tracing::info;
-
 use deepomni_context::{ContextFragment, ContextManager, TokenBudget, assemble_context};
-use deepomni_engine::{AgentControl, Mailbox};
+// Phase D: SubagentSpawner trait replaces direct engine dependency.
+
+/// Trait for spawning sub-agents. Defined in the agent layer so the
+/// agent doesn't depend on engine lifecycle primitives. The runtime
+/// implements this trait to provide multi-agent orchestration.
+#[async_trait::async_trait]
+pub trait SubagentSpawner: Send + Sync {
+    /// Check if a sub-agent can be spawned at the given depth.
+    fn can_spawn(&self, depth: u32) -> bool;
+
+    /// Spawn a child sub-agent synchronously (runs child to completion
+    /// and returns the result).
+    async fn spawn(
+        &self,
+        parent_thread_id: ThreadId,
+        parent_turn_id: TurnId,
+        task: String,
+        provider: Arc<dyn ModelProvider>,
+        config: TurnConfig,
+    ) -> Result<SubagentResult, TurnError>;
+}
 use deepomni_journal::{JournalEntry, TurnJournal};
 use deepomni_model_provider::{
     MessageRole, ModelDelta, ModelMessage, ModelProvider, ModelRequest, ModelToolCall,
@@ -199,7 +217,7 @@ pub struct TurnRunner {
     tool_router: ToolRouter,
     tool_call_runtime: ToolCallRuntime,
     trace_writer: Arc<dyn TraceWriter>,
-    agent_control: Option<Arc<AgentControl>>,
+    spawner: Option<Arc<dyn SubagentSpawner>>,
 }
 
 impl TurnRunner {
@@ -218,13 +236,13 @@ impl TurnRunner {
             tool_router,
             tool_call_runtime,
             trace_writer,
-            agent_control: None,
+            spawner: None,
         }
     }
 
-    /// Set the agent control for multi-agent spawn support.
-    pub fn with_agent_control(mut self, agent_control: Arc<AgentControl>) -> Self {
-        self.agent_control = Some(agent_control);
+    /// Set the subagent spawner for multi-agent support (Phase D).
+    pub fn with_subagent_spawner(mut self, spawner: Arc<dyn SubagentSpawner>) -> Self {
+        self.spawner = Some(spawner);
         self
     }
 
@@ -319,6 +337,7 @@ impl TurnRunner {
         let mut transcript = request.messages.clone();
         let message_id = MessageId::new();
         let mut final_answer = String::new();
+        let mut transcript_deltas: Vec<TurnTranscriptDelta> = Vec::new();
         let mut iteration = 0u32;
         const MAX_ITERATIONS: u32 = 10;
         let mut pending_tool_calls: Vec<ToolCallState> = Vec::new();
@@ -362,6 +381,10 @@ impl TurnRunner {
                     Some(ModelDelta::End) => break,
                     Some(ModelDelta::Text(text)) => {
                         final_answer.push_str(&text);
+                        // Phase F: collect transcript delta.
+                        transcript_deltas.push(TurnTranscriptDelta::AssistantDelta {
+                            delta: text.clone(),
+                        });
                         ctx.record(deepomni_protocol::TurnItem::AssistantDelta {
                             delta: text.clone(),
                         });
@@ -544,6 +567,7 @@ impl TurnRunner {
                                         tool_name: tc.tool_name,
                                         arguments,
                                         approval_id,
+                                        transcript_deltas: transcript_deltas.clone(),
                                     });
                                 }
                                 deepomni_tools::OrchestratorDecision::Forbidden { reason } => {
@@ -733,6 +757,7 @@ impl TurnRunner {
                     tool_name: tc.tool_name,
                 })
                 .collect(),
+            transcript_deltas,
         })
     }
 
@@ -901,7 +926,8 @@ impl TurnRunner {
 
     // ── Sub-agent spawning ──
 
-    /// Spawn a child sub-agent turn.
+    /// Spawn a child sub-agent turn. If a SubagentSpawner is configured,
+    /// delegates to it. Otherwise falls back to direct synchronous execution.
     pub async fn spawn_subagent(
         &self,
         parent_thread_id: ThreadId,
@@ -910,17 +936,20 @@ impl TurnRunner {
         provider: Arc<dyn ModelProvider>,
         config: TurnConfig,
     ) -> Result<SubagentResult, TurnError> {
+        // Phase D: Delegate to SubagentSpawner trait if configured.
+        if let Some(ref spawner) = self.spawner {
+            if !spawner.can_spawn(0) {
+                return Err(TurnError::ProviderError("agent spawn limit reached".into()));
+            }
+            return spawner
+                .spawn(parent_thread_id, parent_turn_id, task, provider, config)
+                .await;
+        }
+
+        // Fallback: direct synchronous execution (no spawner configured).
         let subagent_id = SubagentId::new();
         let child_thread_id = ThreadId::new();
         let child_turn_id = TurnId::new();
-
-        // Phase 5: Register child with AgentControl if available.
-        let (mailbox, _receiver) = Mailbox::new();
-        if let Some(ref ctrl) = self.agent_control
-            && !ctrl.can_spawn(0)
-        {
-            return Err(TurnError::ProviderError("agent spawn limit reached".into()));
-        }
 
         self.emit(
             parent_thread_id.clone(),
@@ -932,7 +961,6 @@ impl TurnRunner {
         )
         .await;
 
-        // Write journal entry for SSE replay (Plan 4).
         let _ = self.journal.append(
             &parent_thread_id,
             &parent_turn_id,
@@ -943,17 +971,9 @@ impl TurnRunner {
             },
         );
 
-        // Trace agent spawn.
         self.trace_writer
             .record_agent_spawn(&parent_thread_id, &child_thread_id);
 
-        info!(
-            subagent_id = %subagent_id,
-            parent_turn = %parent_turn_id,
-            "spawning sub-agent"
-        );
-
-        // Sub-agent runs with same tool set but stricter permissions.
         let result = self
             .run_turn(RunTurnRequest {
                 thread_id: child_thread_id,
@@ -968,19 +988,8 @@ impl TurnRunner {
             })
             .await;
 
-        // Phase 5: Send result to parent via mailbox.
         match result {
             Ok(TurnResult::Completed { answer, .. }) => {
-                let _ = mailbox.send(deepomni_protocol::agent::InterAgentMessage {
-                    author: deepomni_protocol::agent::AgentPath::from_string(format!(
-                        "/root/{}",
-                        subagent_id
-                    )),
-                    recipient: deepomni_protocol::agent::AgentPath::root(),
-                    other_recipients: vec![],
-                    content: answer.clone(),
-                    trigger_turn: true,
-                });
                 self.emit(
                     parent_thread_id.clone(),
                     EventFrame::SubagentCompleted {
@@ -1083,12 +1092,41 @@ pub struct SubagentResult {
 }
 
 /// Result of running a turn.
+/// Phase F: Incremental transcript delta produced by the agent.
+/// Collected alongside emit/journal calls for the engine to process.
+#[derive(Debug, Clone)]
+pub enum TurnTranscriptDelta {
+    AssistantDelta {
+        delta: String,
+    },
+    ToolCallStarted {
+        call_id: ToolCallId,
+        tool_name: String,
+    },
+    ToolCallCompleted {
+        call_id: ToolCallId,
+        tool_name: String,
+        success: bool,
+        output_preview: Option<String>,
+    },
+    ReasoningDelta {
+        delta: String,
+        replay_required: bool,
+    },
+    TokenUsage {
+        prompt_tokens: u64,
+        completion_tokens: u64,
+    },
+}
+
 #[derive(Debug)]
 pub enum TurnResult {
     Completed {
         turn_id: TurnId,
         answer: String,
         tool_calls: Vec<CompletedToolCall>,
+        /// Phase F: Transcript deltas for the engine to process.
+        transcript_deltas: Vec<TurnTranscriptDelta>,
     },
     NeedsApproval {
         turn_id: TurnId,
@@ -1096,6 +1134,8 @@ pub enum TurnResult {
         tool_name: String,
         arguments: serde_json::Value,
         approval_id: String,
+        /// Phase F: Transcript deltas up to the approval point.
+        transcript_deltas: Vec<TurnTranscriptDelta>,
     },
 }
 
