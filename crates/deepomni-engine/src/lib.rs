@@ -15,7 +15,7 @@ pub mod turn_fsm;
 pub use agent_control::{AgentControl, AgentRegistry};
 pub use approval::ApprovalCoordinator;
 pub use compaction::CompactionTracker;
-pub use deepomni_prompt::{CompileConfig, CompiledRequest, RequestCompiler, TurnRequestKind};
+pub use deepomni_context::{CompileConfig, CompiledRequest, RequestCompiler, TurnRequestKind};
 pub use mailbox::{Mailbox, MailboxReceiver};
 pub use session::SessionManager;
 pub use session_loop::{

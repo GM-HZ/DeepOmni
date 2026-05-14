@@ -23,10 +23,6 @@ members = [
     "crates/deepomni-hooks",
     "crates/deepomni-server",
     "crates/deepomni-task",
-    "crates/deepomni-computer-use",
-    "crates/deepomni-cli",
-    "crates/deepomni-capabilities",
-    "crates/deepomni-prompt",
     "crates/deepomni-test-support",
 ]
 resolver = "2"

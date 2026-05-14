@@ -1,6 +1,6 @@
 //! Provider-aware request compiler with three explicit paths.
 
-use deepomni_context::ContextFragment;
+use crate::ContextFragment;
 #[cfg(test)]
 use deepomni_model_provider::ModelToolCall;
 use deepomni_model_provider::{MessageRole, ModelMessage, ModelRequest, ReasoningReplay};
@@ -250,7 +250,7 @@ impl RequestCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use deepomni_context::ContextFragment;
+    use crate::ContextFragment;
 
     fn test_config() -> CompileConfig<'static> {
         CompileConfig {

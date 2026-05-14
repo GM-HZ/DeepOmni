@@ -7,9 +7,11 @@
 
 pub mod compaction;
 pub mod normalize;
+pub mod request_compiler;
 
 pub use compaction::{build_compacted_history, build_compaction_request};
 pub use normalize::normalize_history;
+pub use request_compiler::{CompileConfig, CompiledRequest, RequestCompiler, TurnRequestKind};
 
 use std::collections::VecDeque;
 

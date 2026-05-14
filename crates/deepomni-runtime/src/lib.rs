@@ -780,7 +780,7 @@ impl Runtime {
         };
 
         // Build system prompt and compute cache hash for provider.
-        let prompt = deepomni_prompt::PromptBuilder::new(augmented_prompt.clone()).build();
+        let prompt = deepomni_context::PromptBuilder::new(augmented_prompt.clone()).build();
         tracing::debug!(
             prompt_hash = %prompt.static_hash,
             prompt_len = prompt.content.len(),

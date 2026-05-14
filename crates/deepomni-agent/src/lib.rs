@@ -34,13 +34,13 @@ pub trait SubagentSpawner: Send + Sync {
         config: TurnConfig,
     ) -> Result<SubagentResult, TurnError>;
 }
+pub use deepomni_context::TurnRequestKind;
 use deepomni_journal::{JournalEntry, TurnJournal};
 use deepomni_model_provider::{
     MessageRole, ModelDelta, ModelMessage, ModelProvider, ModelRequest, ModelToolCall,
     ReasoningReplay,
 };
 use deepomni_policy::{AgentMode, PermissionProfile, PolicyEngine};
-pub use deepomni_prompt::TurnRequestKind;
 use deepomni_protocol::EventFrame;
 use deepomni_protocol::id::{MessageId, SubagentId, ThreadId, ToolCallId, TurnId};
 use deepomni_tools::{
@@ -311,7 +311,7 @@ impl TurnRunner {
         }
 
         // 4. Build initial model request using a lower-level RequestCompiler.
-        let compile_config = deepomni_prompt::CompileConfig {
+        let compile_config = deepomni_context::CompileConfig {
             system_prompt: config.system_prompt.as_deref(),
             fragments: &assembled.messages,
             tools: tool_specs.clone(),
@@ -319,7 +319,7 @@ impl TurnRunner {
             model: ctx.model(),
             reasoning_to_replay: reasoning_to_replay.clone(),
         };
-        let compiled = deepomni_prompt::RequestCompiler::compile(
+        let compiled = deepomni_context::RequestCompiler::compile(
             request_kind,
             &compile_config,
             &conversation_history,
@@ -1452,7 +1452,7 @@ mod tests {
 
     #[test]
     fn request_compiler_new_turn_appends_user_input() {
-        use deepomni_prompt::{CompileConfig, RequestCompiler};
+        use deepomni_context::{CompileConfig, RequestCompiler};
         let config = CompileConfig {
             system_prompt: Some("system"),
             fragments: &[],
@@ -1473,7 +1473,7 @@ mod tests {
 
     #[test]
     fn request_compiler_tool_continuation_does_not_append_fake_user() {
-        use deepomni_prompt::{CompileConfig, RequestCompiler};
+        use deepomni_context::{CompileConfig, RequestCompiler};
         let config = CompileConfig {
             system_prompt: Some("system"),
             fragments: &[],

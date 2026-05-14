@@ -15,4 +15,3 @@ deepomni-protocol = { path = "../deepomni-protocol" }
 deepomni-model-provider = { path = "../deepomni-model-provider" }
 deepomni-context = { path = "../deepomni-context" }
 deepomni-journal = { path = "../deepomni-journal" }
-deepomni-prompt = { path = "../deepomni-prompt" }
