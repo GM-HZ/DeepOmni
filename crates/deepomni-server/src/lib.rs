@@ -21,6 +21,7 @@ use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 
 use deepomni_protocol::id::ThreadId;
+use deepomni_protocol::op::{Op, TurnSettings, UserInput};
 
 pub mod protocol_adapter;
 
@@ -206,25 +207,26 @@ async fn create_turn(
     Json(body): Json<CreateTurnBody>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let tid = ThreadId::from_string(thread_id.clone());
-    let request = deepomni_protocol::CreateTurnRequest {
-        input: body.input.clone(),
-        model: body.model.clone(),
-        parent_turn_id: None,
-        subagent_id: None,
-        max_token_budget: body.max_token_budget,
-    };
-
-    // submit_turn now routes through SessionLoop when available (Phase 1),
-    // so no separate try_submit_op is needed.
-    let turn = state.runtime.submit_turn(tid, request).await.map_err(|e| {
-        tracing::error!("failed to create turn: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    // Codex-style: submit Op, return SubmissionId immediately.
+    // Turn lifecycle events stream via SSE.
+    let sub_id = state
+        .runtime
+        .submit(Op::UserInput {
+            thread_id: tid,
+            input: vec![UserInput::Text {
+                text: body.input.clone(),
+            }],
+            settings: TurnSettings {
+                model: body.model.clone(),
+                ..Default::default()
+            },
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(serde_json::json!({
         "thread_id": thread_id,
-        "turn_id": turn.id.to_string(),
-        "status": format!("{:?}", turn.status).to_lowercase(),
+        "submission_id": sub_id.as_str(),
     })))
 }
 

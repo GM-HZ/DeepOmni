@@ -36,11 +36,15 @@ use deepomni_tools::{ApprovalStore, ToolRegistry};
 use deepomni_trace::{NoopTraceWriter, TraceWriter};
 use turn_adapter::RuntimeTurnAdapter;
 
-/// The main runtime facade.
-///
-/// All public handles are cheap `Arc` clones.
+/// The main runtime facade exposed as a queue pair:
+/// `submit(op)` → SubmissionId (fire-and-forget on tx_sub)
+/// `next_event(thread_id)` → Event (poll from rx_event)
+/// Pattern from Codex: SessionLoop bridges submission queue → event queue.
 pub struct Runtime {
     inner: Arc<RuntimeInner>,
+    /// Event receiver — SessionLoop writes events here, callers poll via next_event().
+    rx_event:
+        tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<deepomni_protocol::event::Event>>,
 }
 
 // PendingApproval is now deepomni_engine::approval::PendingApproval.
@@ -73,6 +77,8 @@ struct RuntimeInner {
     projection_service: Arc<projection::ProjectionService>,
     /// Phase 5: Multi-agent control for parent-child agent communication.
     agent_control: Arc<AgentControl>,
+    /// Codex-style event queue sender — SessionLoop writes events here.
+    tx_event: tokio::sync::mpsc::UnboundedSender<deepomni_protocol::event::Event>,
 }
 
 /// Long-lived service container shared by sessions and turn machinery. This is
@@ -279,7 +285,11 @@ impl RuntimeBuilder {
 
         let state_for_projection = state.clone() as Arc<dyn deepomni_journal::TurnJournal>;
         let event_bus_for_projection = event_bus.clone();
+        // Codex-style queue pair: tx_event → SessionLoop writes events, rx_event → callers poll.
+        let (tx_event, rx_event) =
+            tokio::sync::mpsc::unbounded_channel::<deepomni_protocol::event::Event>();
         Ok(Runtime {
+            rx_event: tokio::sync::Mutex::new(rx_event),
             inner: Arc::new(RuntimeInner {
                 config,
                 state,
@@ -302,6 +312,7 @@ impl RuntimeBuilder {
                     event_bus_for_projection,
                 )),
                 agent_control: Arc::new(AgentControl::new(16, 4)),
+                tx_event,
             }),
         })
     }
@@ -316,6 +327,16 @@ impl Default for RuntimeBuilder {
 // ── Runtime API ──
 
 impl Runtime {
+    /// Internal constructor for code paths that don't need the event receiver.
+    pub(crate) fn from_inner(inner: Arc<RuntimeInner>) -> Self {
+        let (_, rx_event) =
+            tokio::sync::mpsc::unbounded_channel::<deepomni_protocol::event::Event>();
+        Runtime {
+            inner,
+            rx_event: tokio::sync::Mutex::new(rx_event),
+        }
+    }
+
     /// Return a reference to the resolved config.
     pub fn config(&self) -> &ResolvedConfig {
         &self.inner.config
@@ -415,7 +436,7 @@ impl Runtime {
         // through both oneshot (for direct await) and Mailbox (for parent).
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
-            let child_runtime = Runtime { inner };
+            let child_runtime = Runtime::from_inner(inner);
             let result = child_runtime
                 .submit_turn(
                     cid.clone(),
@@ -1133,6 +1154,12 @@ impl Runtime {
             .state
             .upsert_thread(&record)
             .map_err(|e| RuntimeError::State(format!("{e}")))
+    }
+
+    /// Codex-style: poll the next event from the session event queue.
+    /// Events carry a submission_id for correlation with submit().
+    pub async fn next_event(&self) -> Option<deepomni_protocol::event::Event> {
+        self.rx_event.lock().await.recv().await
     }
 
     /// Subscribe to live events for a thread.
